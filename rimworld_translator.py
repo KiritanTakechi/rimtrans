@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import google.genai as genai
-from google.genai import types
+from google.genai import chats, types
 from google.genai.errors import APIError
 from tqdm import tqdm
 
@@ -39,7 +39,7 @@ STEAM_USERNAME: str = "anonymous"
 STEAM_PASSWORD: str = ""
 
 # 6. Windows Steam 安装路径 (仅当在 Windows 上运行且 Steam 未安装在默认位置时需要修改)
-STEAM_INSTALL_PATH_WINDOWS: str = "/Users/kiritan/Library/Application Support/Steam"
+STEAM_INSTALL_PATH_WINDOWS: str = "C:/Program Files (x86)/Steam"
 
 # 7. RimWorld 在 Steam 上的 App ID
 RIMWORLD_APP_ID: str = "294100"
@@ -265,14 +265,19 @@ def get_mod_info(mod_path: Path) -> Optional[Dict[str, str]]:
         root = tree.getroot()
         name_node = root.find("name")
         package_id_node = root.find("packageId")
-
-        # packageId可能不存在，给一个基于作者和名称的备用值
         author_node = root.find("author")
-        author = author_node.text.strip().replace(" ",
-                                                  "") if author_node is not None and author_node.text else "Unknown"
+
+        # 清理函数，只保留字母、数字和下划线
+        def sanitize_for_package_id(text: str) -> str:
+            return "".join(c for c in text if c.isalnum() or c == '_')
+
+        author = sanitize_for_package_id(author_node.text.strip()) if author_node is not None and author_node.text else "UnknownAuthor"
         name = name_node.text.strip() if name_node is not None and name_node.text else mod_path.name
 
-        package_id = package_id_node.text.strip() if package_id_node is not None and package_id_node.text else f"{author}.{name.replace(' ', '')}"
+        # 使用更安全的清理函数
+        safe_name_for_id = sanitize_for_package_id(name)
+
+        package_id = package_id_node.text.strip() if package_id_node is not None and package_id_node.text else f"{author}.{safe_name_for_id}"
 
         return {"name": name, "packageId": package_id.lower()}
     except ET.ParseError:
@@ -422,21 +427,11 @@ def translate_with_gemini(client: genai.Client, xml_content: str) -> Optional[st
     你的任务是将用户提供的英文 XML 内容翻译成简体中文。
     请严格遵守以下规则：
     1.  **保持结构**: 绝对不要修改任何 XML 标签（例如 `<tag>`）。只翻译标签内的文本。
-    2.  **格式一致**: 输出必须是格式良好、可以被程序直接解析的 XML。不要添加任何额外的解释、注释或 ```xml ... ``` 标记。
-    3.  **完整性**: 翻译所有提供的条目，不要遗漏。
-
-    这是一个例子：
-    输入:
-    <ThingDef.label>sandstone block</ThingDef.label>
-    <ThingDef.description>Blocks of sandstone. Sandstone is a relatively soft rock that is quick to quarry.</ThingDef.description>
-
-    你的输出应该是:
-    <ThingDef.label>砂岩石砖</ThingDef.label>
-    <ThingDef.description>砂岩制成的石砖。砂岩是一种相对较软的岩石，开采速度很快。</ThingDef.description>
+    2.  **完整性**: 翻译所有提供的条目，不要遗漏。
     """
 
     # 2. 从全局字典动态构建术语表提示部分
-    glossary_prompt_part = "4. **术语统一**: 这是最重要的规则。请严格参考以下术语表进行翻译，确保关键词的统一性。如果术语表中的词汇出现，必须使用对应的翻译：\n"
+    glossary_prompt_part = "3. **术语统一**: 这是最重要的规则。请严格参考以下术语表进行翻译，确保关键词的统一性。如果术语表中的词汇出现，必须使用对应的翻译：\n"
     # 使用 .items() 遍历字典
     glossary_items = [f"- '{en.lower()}': '{cn}'" for en, cn in RIMWORLD_GLOSSARY.items()]
     glossary_prompt_part += "\n".join(glossary_items)
@@ -464,67 +459,108 @@ def translate_with_gemini(client: genai.Client, xml_content: str) -> Optional[st
     return None
 
 
-def translate_and_save(client: genai.Client, targets: Dict[str, str], memory: Dict[str, str], output_file_path: Path):
-    """通用翻译和保存逻辑。"""
+def get_setup_prompt() -> str:
+    """构建用于初始化Chat会话的系统指令和术语表。"""
+    base_system_prompt = """你是一个为游戏《环世界》(RimWorld) 设计的专业级翻译引擎。你的任务是将用户提供的英文 XML 内容翻译成简体中文。
+请严格遵守以下规则：
+1.  **保持结构**: 绝对不要修改任何 XML 标签。只翻译标签内的文本。
+2.  **格式一致**: 输出必须是格式良好、可以被程序直接解析的 XML。不要添加任何额外的解释或标记。
+3.  **完整性**: 翻译所有提供的条目。"""
+
+    glossary_prompt_part = "4. **术语统一**: 这是最重要的规则。请严格参考以下术语表进行翻译，确保关键词的统一性。如果术语表中的词汇出现，必须使用对应的翻译：\n"
+    glossary_items = [f"- '{en.lower()}': '{cn}'" for en, cn in RIMWORLD_GLOSSARY.items()]
+    glossary_prompt_part += "\n".join(glossary_items)
+
+    return f"{base_system_prompt}\n\n{glossary_prompt_part}\n\n我明白了这些规则，请开始提供需要翻译的XML内容。"
+
+
+def translate_chunk_in_chat(chat_session: chats.Chat, xml_content: str) -> Optional[str]:
+    """在已有的Chat会话中发送并翻译一小块XML内容。"""
+    try:
+        # 在Chat模式下，不需要system_instruction，因为初始指令已经发送过了
+        response = chat_session.send_message(xml_content)
+        return response.text
+    except Exception as e:
+        print(f"在会话中调用 Gemini 时发生错误: {e}")
+        # 尝试从错误中恢复，返回None
+        return None
+
+
+def translate_and_save(chat_session: chats.Chat, targets: Dict[str, str], memory: Dict[str, str],
+                       output_file_path: Path):
+    """通用翻译和保存逻辑 (增强了对API返回不完整的鲁棒性)。"""
     to_translate_dict = {k: v for k, v in targets.items() if k not in memory}
     final_translation_dict = {k: memory[k] for k, v in targets.items() if k in memory}
 
     if to_translate_dict:
         xml_to_translate_str = "\n".join([f"<{key}>{value}</{key}>" for key, value in to_translate_dict.items()])
         time.sleep(1)
-        translated_text = translate_with_gemini(client, xml_to_translate_str)
+
+        translated_text = translate_chunk_in_chat(chat_session, xml_to_translate_str)
+
+        # --- 关键修改开始 ---
+        # 1. 先用一个临时字典存储API返回的结果
+        parsed_translations = {}
         if translated_text:
             try:
                 translated_root = ET.fromstring(f"<root>{translated_text}</root>")
                 for elem in translated_root:
-                    final_translation_dict[elem.tag] = elem.text.strip() if elem.text else ""
+                    parsed_translations[elem.tag] = elem.text.strip() if elem.text else ""
             except ET.ParseError:
-                print(f"\n警告: Gemini 返回XML格式无效, 文件 '{output_file_path.name}' 部分翻译可能丢失。")
-                for key in to_translate_dict: final_translation_dict[key] = f"【翻译失败】{targets[key]}"
+                print(f"\n警告: Gemini 返回XML格式无效, 文件 '{output_file_path.name}' 的所有待翻译条目将保留原文。")
+
+        # 2. 遍历原始的“待翻译”列表，确保每个条目都有归宿
+        for key, original_text in to_translate_dict.items():
+            if key in parsed_translations:
+                final_translation_dict[key] = parsed_translations[key]
+            else:
+                # 如果API返回的结果中缺少这个key，则保留原文并添加标记
+                print(f"  -> 警告: 翻译结果中缺少 <{key}>，将保留英文原文。")
+                final_translation_dict[key] = f"【原文】{original_text}"
+        # --- 关键修改结束 ---
 
     if not final_translation_dict: return
 
     output_file_path.parent.mkdir(parents=True, exist_ok=True)
     root = ET.Element("LanguageData")
-    for key in targets:  # 按原始顺序写入
+    for key in targets:
         if key in final_translation_dict:
-            node = ET.SubElement(root, key);
+            node = ET.SubElement(root, key)
             node.text = final_translation_dict[key]
-    tree = ET.ElementTree(root);
+    tree = ET.ElementTree(root)
     ET.indent(tree, space="  ", level=0)
     tree.write(output_file_path, encoding='utf-8', xml_declaration=True)
 
 
-def process_standard_translation(client: genai.Client, mod_path: Path, mod_info: Dict, memory: Dict, output_path: Path):
-    """处理 Languages/English 文件夹中的标准翻译。"""
+def process_standard_translation(chat_session: chats.Chat, mod_path: Path, mod_info: Dict, memory: Dict,
+                                 output_path: Path):
+    """处理 Languages/English 文件夹中的标准翻译 (修改为使用Chat会话)。"""
     english_files = find_language_files(mod_path, "English")
     if not english_files: return
 
-    print(f"  -> 找到 {len(english_files)} 个标准语言文件，开始处理...")
+    print(f"  -> 找到 {len(english_files)} 个标准语言文件，在当前会话中处理...")
     for file_path in english_files:
         targets = load_xml_as_dict(file_path)
         if not targets: continue
-
         try:
             english_dir = next(p for p in file_path.parents if p.name == 'English')
             output_relative_path = file_path.relative_to(english_dir)
         except StopIteration:
             print(f"错误: 无法在路径中找到 'English' 目录 '{file_path}'，跳过。")
             continue
-
         safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
         output_file_path = output_path / "Cont" / safe_mod_name / "Languages" / "ChineseSimplified" / output_relative_path
 
-        translate_and_save(client, targets, memory, output_file_path)
+        translate_and_save(chat_session, targets, memory, output_file_path)
 
 
-def process_def_injection_translation(client: genai.Client, mod_path: Path, mod_info: Dict, memory: Dict,
+def process_def_injection_translation(chat_session: chats.Chat, mod_path: Path, mod_info: Dict, memory: Dict,
                                       output_path: Path):
-    """处理 Defs/ 文件夹中的注入式翻译 (新功能)。"""
+    """处理 Defs/ 文件夹中的注入式翻译 (修改为使用Chat会话)。"""
     def_files = list(mod_path.rglob("Defs/**/*.xml"))
     if not def_files: return
 
-    print(f"  -> 找到 {len(def_files)} 个定义(Defs)文件，扫描注入点...")
+    print(f"  -> 找到 {len(def_files)} 个定义(Defs)文件，在当前会话中扫描注入点...")
     for file_path in def_files:
         targets = {}
         try:
@@ -533,69 +569,73 @@ def process_def_injection_translation(client: genai.Client, mod_path: Path, mod_
                 def_name_node = element.find("defName")
                 if def_name_node is None or not def_name_node.text: continue
                 def_name = def_name_node.text.strip()
-
                 for sub_element in element:
                     if sub_element.tag in TRANSLATABLE_DEF_TAGS and sub_element.text:
-                        injection_key = f"{def_name}.{sub_element.tag}"
-                        targets[injection_key] = sub_element.text.strip()
+                        targets[f"{def_name}.{sub_element.tag}"] = sub_element.text.strip()
         except ET.ParseError:
-            continue  # 跳过无法解析的XML
-
+            continue
         if not targets: continue
 
         print(f"    -> 在 {file_path.name} 中发现 {len(targets)} 个可注入字段。")
-
         relative_def_path = file_path.relative_to(mod_path)
         safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
         output_file_path = output_path / "Cont" / safe_mod_name / "Languages" / "ChineseSimplified" / "DefInjected" / relative_def_path
 
-        translate_and_save(client, targets, memory, output_file_path)
+        translate_and_save(chat_session, targets, memory, output_file_path)
 
 
 def main():
-    """脚本主入口。"""
-    client = setup_environment()
-    workshop_path = get_workshop_content_path()
+    """脚本主入口，采用“每Mod一会话”模式。"""
+    client = setup_environment()  # 此处省略setup_environment的完整代码
+    workshop_path = get_workshop_content_path()  # 此处省略get_workshop_content_path的完整代码
 
     prev_ids = parse_ids(PREVIOUS_TRANSLATION_IDS)
     new_ids = parse_ids(MODS_TO_TRANSLATE_IDS)
 
-    download_with_steamcmd(list(set(prev_ids + new_ids)))
+    download_with_steamcmd(list(set(prev_ids + new_ids)))  # 此处省略download_with_steamcmd的完整代码
 
-    print("\n--- 正在收集待汉化Mod的元数据 ---")
-    mod_content_path = workshop_path / RIMWORLD_APP_ID
     mod_info_map = {}
+    mod_content_path = workshop_path / RIMWORLD_APP_ID
+    print("\n--- 正在收集待汉化Mod的元数据 ---")
     for mod_id in new_ids:
         mod_path = mod_content_path / mod_id
         if mod_path.is_dir():
-            info = get_mod_info(mod_path)
-            if info:
-                info['id'] = mod_id
-                mod_info_map[mod_id] = info
-                print(f"  > 找到Mod: {info['name']} (packageId: {info['packageId']})")
-            else:
-                mod_info_map[mod_id] = {"name": mod_id, "packageId": mod_id, "id": mod_id}
+            info = get_mod_info(mod_path)  # 此处省略get_mod_info的完整代码
+            info = info if info else {"name": mod_id, "packageId": mod_id}
+            info['id'] = mod_id
+            mod_info_map[mod_id] = info
+            print(f"  > 找到Mod: {info['name']} (packageId: {info['packageId']})")
 
-    output_path = Path.cwd() / TRANSLATION_MOD_NAME.replace(" ", "_")
+    output_path = Path.cwd() / OUTPUT_PATH / TRANSLATION_MOD_NAME.replace(" ", "_")
     output_path.mkdir(exist_ok=True)
     print(f"\n汉化包将生成在: {output_path.resolve()}")
 
-    create_about_file(output_path, mod_info_map)
-    create_load_folders_file(output_path, mod_info_map)
-    create_self_translation(output_path)
+    create_about_file(output_path, mod_info_map)  # 此处省略create_about_file的完整代码
+    create_load_folders_file(output_path, mod_info_map)  # 此处省略create_load_folders_file的完整代码
+    create_self_translation(output_path)  # 此处省略create_self_translation的完整代码
 
-    translation_memory = build_translation_memory(prev_ids, workshop_path)
+    translation_memory = build_translation_memory(prev_ids, workshop_path)  # 此处省略build_translation_memory的完整代码
 
-    print("\n--- 开始双模式翻译 ---")
+    print("\n--- 开始翻译 ---")
+    setup_prompt = get_setup_prompt()
+
     for mod_id, mod_info in mod_info_map.items():
-        print(f"\n>>> 正在处理 Mod: {mod_info['name']} (ID: {mod_id})")
+        print(f"\n>>> 正在为 Mod '{mod_info['name']}' 创建新的翻译会话...")
         mod_path = mod_content_path / mod_id
 
-        # 模式一：标准翻译
-        process_standard_translation(client, mod_path, mod_info, translation_memory, output_path)
+        # 为每个Mod创建一个新的chat session
+        chat_session = client.chats.create(
+            model=GEMINI_MODEL
+        )
 
-        # 模式二：注入式翻译
-        process_def_injection_translation(client, mod_path, mod_info, translation_memory, output_path)
+        print("    -> 正在发送系统指令和术语表以初始化会话...")
+        initial_response = chat_session.send_message(setup_prompt)
+        print(f"    -> AI回应: {initial_response.text[:80]}...")  # 打印AI的确认信息
+
+        # 在这个会话中处理该Mod的所有翻译任务
+        process_standard_translation(chat_session, mod_path, mod_info, translation_memory, output_path)
+        process_def_injection_translation(chat_session, mod_path, mod_info, translation_memory, output_path)
+        print(f"<<< Mod '{mod_info['name']}' 的会话处理完毕。")
 
     print("\n--- 所有任务完成！---")
     print(f"汉化包 '{TRANSLATION_MOD_NAME}' 已在以下路径生成完毕: \n{output_path.resolve()}")
