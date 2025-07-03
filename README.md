@@ -4,7 +4,7 @@
 
 ### 第1步：克隆本项目
 
-`git clone `
+`git clone https://github.com/KiritanTakechi/rimtrans`
 
 ### 第2步：环境准备 (一次性设置)
 
@@ -33,6 +33,18 @@ Windows (Powershell):
 
 #### 3. 在虚拟环境中安装所有必需的Python库
 `uv sync`
+
+#### 4. 准备 SteamCMD
+从Valve官方文档下载并解压SteamCMD。
+记下其可执行文件的绝对路径，例如：
+Windows: C:/steamcmd/steamcmd.exe
+macOS/Linux: /Users/yourname/steamcmd/steamcmd.sh
+您需要在后续的配置文件中填入这个路径。
+
+#### 5. 获取 Gemini API 密钥
+访问 Google AI Studio 并获取您的API密钥。
+macOS / Linux: 在您的 .zshrc 或 .bash_profile 文件中添加 export GEMINI_API_KEY='你的API密钥'。
+Windows: 通过“编辑系统环境变量”界面添加一个名为 GEMINI_API_KEY 的新变量。
 
 ### 第3步：项目配置 (为每个汉化包进行配置)
 
