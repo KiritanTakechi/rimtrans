@@ -19,7 +19,7 @@ from tqdm import tqdm
 TRANSLATION_MOD_NAME: str = "Adaptive Storage SCN"
 TRANSLATION_MOD_AUTHOR: str = "Kiritan"
 TRANSLATION_MOD_DESCRIPTION: str = "这是一个自动生成的汉化包，为以下Mod提供简体中文支持：\n\n"
-TARGET_RIMWORLD_VERSION: str = "1.5, 1.6" # 目标RimWorld版本
+TARGET_RIMWORLD_VERSION: str = "1.5" # 目标RimWorld版本
 
 # 2. 上一个版本的汉化文件 (可选, 可为空)
 PREVIOUS_TRANSLATION_IDS: str = ""
@@ -50,7 +50,7 @@ BASE_WORKING_DIR: Path = Path(__file__).parent
 OUTPUT_PATH: Path = BASE_WORKING_DIR / "translation_output"
 
 # 9. Gemini API 配置
-GEMINI_MODEL: str = "gemini-2.5-flash"
+GEMINI_MODEL: str = "gemini-2.5-flash-lite-preview-06-17"
 
 # 10. RimWorld 核心术语表
 RIMWORLD_GLOSSARY = {
@@ -582,66 +582,79 @@ def process_standard_translation(client: genai.Client, history: List[types.Conte
 
 def process_def_injection_translation(client: genai.Client, history: List[types.Content], mod_path: Path,
                                       mod_info: Dict, memory: Dict, output_path: Path):
-    """处理Defs/文件夹中的注入式翻译，采用按DefType分组的官方标准结构。"""
+    """处理Defs/和Patches/文件夹中的注入式翻译。"""
 
-    # 1. 优先查找并获取所有待处理的Def文件
-    def_files = []
-    version_defs_path = mod_path / TARGET_RIMWORLD_VERSION / "Defs"
-    if version_defs_path.is_dir():
-        def_files = list(version_defs_path.rglob("*.xml"))
-    if not def_files:
-        root_defs_path = mod_path / "Defs"
-        if root_defs_path.is_dir():
-            def_files = list(root_defs_path.rglob("*.xml"))
-    if not def_files: return
+    root_files = []
+    version_files = []
+    for folder_name in ["Defs", "Patches"]:
+        root_path = mod_path / folder_name
+        if root_path.is_dir():
+            root_files.extend(root_path.rglob("*.xml"))
+        version_path = mod_path / TARGET_RIMWORLD_VERSION / folder_name
+        if version_path.is_dir():
+            version_files.extend(version_path.rglob("*.xml"))
 
-    print(f"  -> 找到 {len(def_files)} 个定义(Defs)文件，扫描注入点...")
+    files_to_scan_in_order = root_files + version_files
+    if not files_to_scan_in_order: return
 
-    # 2. 扫描所有文件，并按 {DefType: {FileName: {Key: Text}}} 的结构分组
+    print(f"  -> 找到 {len(files_to_scan_in_order)} 个定义(Defs/Patches)文件，扫描注入点...")
+
     all_targets_grouped = {}
-    for file_path in def_files:
+    parser = etree.XMLParser(remove_blank_text=True, recover=True)
+
+    def find_translatables_in_elements(elements_iterator, source_file_path, group_dict):
+        for element in elements_iterator:
+            if not isinstance(element.tag, str): continue
+
+            def_type = element.tag
+            def_name_node = element.find("defName")
+            if def_name_node is None or not def_name_node.text: continue
+            def_name = def_name_node.text.strip()
+
+            invalid_chars = ['{', '}', '(', ')', '/']
+            if any(char in def_name for char in invalid_chars): continue
+
+            for sub_element in element:
+                if isinstance(sub_element.tag, str) and sub_element.tag in TRANSLATABLE_DEF_TAGS and sub_element.text:
+                    if def_type not in group_dict: group_dict[def_type] = {}
+                    source_filename = source_file_path.name
+                    if source_filename not in group_dict[def_type]: group_dict[def_type][source_filename] = {}
+
+                    injection_key = f"{def_name}.{sub_element.tag}"
+                    group_dict[def_type][source_filename][injection_key] = sub_element.text.strip()
+
+    for file_path in files_to_scan_in_order:
         try:
-            parser = etree.XMLParser(remove_blank_text=True)
             tree = etree.parse(str(file_path), parser)
-            for element in tree.getroot():
-                if not isinstance(element.tag, str): continue
+            root = tree.getroot()
+            if root is None: continue
 
-                def_type = element.tag
-                def_name_node = element.find("defName")
-                if def_name_node is None or not def_name_node.text: continue
-                def_name = def_name_node.text.strip()
+            # 对每个文件都统一应用两种解析策略
+            # 策略1: 直接解析根节点的子元素 (用于Defs文件)
+            find_translatables_in_elements(root, file_path, all_targets_grouped)
 
-                for sub_element in element:
-                    if isinstance(sub_element.tag,
-                                  str) and sub_element.tag in TRANSLATABLE_DEF_TAGS and sub_element.text:
-                        # 准备分组
-                        if def_type not in all_targets_grouped:
-                            all_targets_grouped[def_type] = {}
+            # 策略2: 深度解析<value>节点的子元素 (用于Patches文件)
+            for value_node in root.xpath('//value'):
+                # 正确的逻辑是遍历<value>的子节点，而不是其.text
+                if len(value_node):  # 检查是否存在子节点
+                    find_translatables_in_elements(value_node, file_path, all_targets_grouped)
 
-                        source_filename = file_path.name
-                        if source_filename not in all_targets_grouped[def_type]:
-                            all_targets_grouped[def_type][source_filename] = {}
-
-                        injection_key = f"{def_name}.{sub_element.tag}"
-                        all_targets_grouped[def_type][source_filename][injection_key] = sub_element.text.strip()
-
-        except etree.XMLSyntaxError:
+        except etree.XMLSyntaxError as e:
+            print(f"警告: lxml解析文件失败，已跳过: {file_path}，错误: {e}")
             continue
 
-    if not all_targets_grouped: return
+    if not all_targets_grouped:
+        print("  -> 未在Defs/Patches中找到可翻译内容。")
+        return
 
-    # 3. 遍历分组后的结果，按正确的目录结构进行翻译和保存
     safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
 
     for def_type, files in all_targets_grouped.items():
         print(f"    -> 发现Def类型: {def_type}")
         for filename, targets in files.items():
-            print(f"      -> 正在处理 {filename} ({len(targets)}个条目)")
-
-            # 构建符合官方标准的输出路径
+            print(f"      -> 正在处理来自 {filename} 的 {len(targets)} 个条目")
             output_dir = output_path / "Cont" / safe_mod_name / "Languages" / "ChineseSimplified" / "DefInjected" / def_type
             output_file_path = output_dir / filename
-
             translate_and_save(client, history, targets, memory, output_file_path)
 
 
