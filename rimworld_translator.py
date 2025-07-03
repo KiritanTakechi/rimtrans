@@ -4,6 +4,8 @@ import sys
 import subprocess
 import time
 import json
+
+from PIL import Image, ImageDraw, ImageFont
 from lxml import etree
 from pathlib import Path
 from pydantic import BaseModel, Field
@@ -16,16 +18,16 @@ from tqdm import tqdm
 # --- 全局配置 (请根据你的情况修改) ---
 
 # 1. 汉化包 Mod 的信息 (请自定义)
-TRANSLATION_MOD_NAME: str = "Adaptive Storage SCN"
+TRANSLATION_MOD_NAME: str = "Big and Small SCN"
 TRANSLATION_MOD_AUTHOR: str = "Kiritan"
 TRANSLATION_MOD_DESCRIPTION: str = "这是一个自动生成的汉化包，为以下Mod提供简体中文支持：\n\n"
-TARGET_RIMWORLD_VERSION: str = "1.5" # 目标RimWorld版本
+TARGET_RIMWORLD_VERSIONS: List[str] = ["1.5", "1.6"]
 
 # 2. 上一个版本的汉化文件 (可选, 可为空)
 PREVIOUS_TRANSLATION_IDS: str = ""
 
 # 3. 需要汉化的 Mod (必需)
-MODS_TO_TRANSLATE_IDS: str = "3033901359,3033901895,3297307747,3301337278,3400037215,3373064575"
+MODS_TO_TRANSLATE_IDS: str = "2925432336,2920751126,2894397737,2908225858,2926556467,3024478368,3027202907,3073163708,3105907309,3170117364,3218636337,3328662155,3328812977,3360323573,3360783902,3434275463,3505241400"
 
 # 4. 可被注入翻译的XML标签列表 (可按需添加)
 TRANSLATABLE_DEF_TAGS = [
@@ -50,7 +52,7 @@ BASE_WORKING_DIR: Path = Path(__file__).parent
 OUTPUT_PATH: Path = BASE_WORKING_DIR / "translation_output"
 
 # 9. Gemini API 配置
-GEMINI_MODEL: str = "gemini-2.5-flash-lite-preview-06-17"
+GEMINI_MODEL: str = "gemini-2.5-flash"
 
 # 10. RimWorld 核心术语表
 RIMWORLD_GLOSSARY = {
@@ -298,6 +300,64 @@ def get_mod_info(mod_path: Path) -> Optional[Dict[str, str]]:
         return None
 
 
+def create_placeholder_images(about_dir: Path, mod_name: str, author_name: str):
+    """使用Pillow库创建占位符Preview.png和ModIcon.png。"""
+    print("正在生成占位符图片...")
+
+    # 尝试加载一个通用字体，如果失败则使用Pillow的默认字体
+    try:
+        title_font = ImageFont.truetype("arial.ttf", 60)
+        subtitle_font = ImageFont.truetype("arial.ttf", 30)
+        icon_font = ImageFont.truetype("arial.ttf", 40)
+    except IOError:
+        print("  -> 警告: 未找到Arial字体，将使用Pillow默认字体。图片效果可能不佳。")
+        title_font = ImageFont.load_default()
+        subtitle_font = ImageFont.load_default()
+        icon_font = ImageFont.load_default()
+
+    # --- 生成 Preview.png ---
+    preview_size = (640, 360)
+    preview_bg_color = (48, 48, 64)  # 深蓝色背景
+    text_color = (255, 255, 255)
+
+    preview_image = Image.new('RGB', preview_size, preview_bg_color)
+    draw = ImageDraw.Draw(preview_image)
+
+    # 绘制Mod名称
+    title_bbox = draw.textbbox((0, 0), mod_name, font=title_font)
+    title_width = title_bbox[2] - title_bbox[0]
+    title_pos = ((preview_size[0] - title_width) / 2, 120)
+    draw.text(title_pos, mod_name, fill=text_color, font=title_font)
+
+    # 绘制作者信息
+    subtitle_text = f"Translation by {author_name}"
+    subtitle_bbox = draw.textbbox((0, 0), subtitle_text, font=subtitle_font)
+    subtitle_width = subtitle_bbox[2] - subtitle_bbox[0]
+    subtitle_pos = ((preview_size[0] - subtitle_width) / 2, 220)
+    draw.text(subtitle_pos, subtitle_text, fill=(200, 200, 200), font=subtitle_font)
+
+    preview_image.save(about_dir / "Preview.png")
+
+    # --- 生成 ModIcon.png ---
+    icon_size = (256, 256)
+    icon_image = Image.new('RGB', icon_size, preview_bg_color)
+    draw = ImageDraw.Draw(icon_image)
+
+    # 截取Mod名的前几个字母作为图标
+    icon_text = "".join([word[0] for word in mod_name.split()[:2]]).upper()
+    if not icon_text:
+        icon_text = mod_name[0].upper() if mod_name else "T"
+
+    icon_bbox = draw.textbbox((0, 0), icon_text, font=icon_font)
+    icon_width = icon_bbox[2] - icon_bbox[0]
+    icon_height = icon_bbox[3] - icon_bbox[1]
+    icon_pos = ((icon_size[0] - icon_width) / 2, (icon_size[1] - icon_height) / 2)
+    draw.text(icon_pos, icon_text, fill=text_color, font=icon_font)
+
+    icon_image.save(about_dir / "ModIcon.png")
+    print("  -> 已自动生成 Preview.png 和 ModIcon.png。")
+
+
 def create_about_file(output_path: Path, mod_info_map: Dict[str, dict]):
     """创建汉化包的About/About.xml文件 (lxml版本)。"""
     about_dir = output_path / "About"
@@ -311,7 +371,8 @@ def create_about_file(output_path: Path, mod_info_map: Dict[str, dict]):
     etree.SubElement(root, "author").text = TRANSLATION_MOD_AUTHOR
 
     supported_versions_node = etree.SubElement(root, "supportedVersions")
-    etree.SubElement(supported_versions_node, "li").text = TARGET_RIMWORLD_VERSION
+    for version in TARGET_RIMWORLD_VERSIONS:
+        etree.SubElement(supported_versions_node, "li").text = version
 
     package_id = f"{TRANSLATION_MOD_AUTHOR.replace(' ', '')}.{TRANSLATION_MOD_NAME.replace(' ', '')}"
     etree.SubElement(root, "packageId").text = package_id
@@ -343,21 +404,22 @@ def create_about_file(output_path: Path, mod_info_map: Dict[str, dict]):
         pretty_print=True
     )
     (about_dir / "PublishedFileId.txt").touch()
-    print("生成 About/About.xml。请手动添加 Preview.png 和 ModIcon.png 到 About 文件夹。")
+    print("生成 About/About.xml。")
+
+    create_placeholder_images(about_dir, TRANSLATION_MOD_NAME, TRANSLATION_MOD_AUTHOR)
 
 
 def create_load_folders_file(output_path: Path, mod_info_map: Dict[str, dict]):
     """创建LoadFolders.xml文件 (lxml版本)。"""
     root = etree.Element("loadFolders")
-    # 注意: XML标签不能以数字开头，所以RimWorld的惯例是在版本号前加'v'
-    version_node = etree.SubElement(root, f"v{TARGET_RIMWORLD_VERSION}")
 
-    for mod_info in mod_info_map.values():
-        safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
-        li_node = etree.SubElement(version_node, "li")
-        # 使用 set() 方法添加属性
-        li_node.set("IfModActive", mod_info['packageId'])
-        li_node.text = f"Cont/{safe_mod_name}"
+    for version in TARGET_RIMWORLD_VERSIONS:
+        version_node = etree.SubElement(root, f"v{version}")
+        for mod_info in mod_info_map.values():
+            safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
+            li_node = etree.SubElement(version_node, "li")
+            li_node.set("IfModActive", mod_info['packageId'])
+            li_node.text = f"Cont/{safe_mod_name}"
 
     tree = etree.ElementTree(root)
     tree.write(
@@ -391,30 +453,29 @@ def create_self_translation(output_path: Path):
 
 
 def find_language_files(mod_path: Path, lang_folder: str) -> List[Path]:
-    """
-    在 Mod 目录中查找指定语言的 XML 文件，按以下优先级顺序：
-    1. /<版本号>/Languages/
-    2. /Languages/
-    3. 任意子目录下的 /Languages/ (作为备用)
-    """
-    # 优先级 1: 版本特定路径 (e.g., /1.5/Languages/)
-    version_lang_path = mod_path / TARGET_RIMWORLD_VERSION / "Languages" / lang_folder
-    if version_lang_path.is_dir():
-        return sorted(list(version_lang_path.rglob("*.xml")))
+    """在 Mod 目录中查找指定语言的 XML 文件，按“根目录 -> 版本”顺序合并。"""
+    found_files = {}  # 使用字典去重并实现覆盖
 
-    # 优先级 2: Mod 根路径 (e.g., /Languages/)
+    # 1. 查找根目录
     root_lang_path = mod_path / "Languages" / lang_folder
     if root_lang_path.is_dir():
-        return sorted(list(root_lang_path.rglob("*.xml")))
+        for f in root_lang_path.rglob("*.xml"):
+            found_files[f.name] = f
 
-    # 优先级 3: 备用方案，递归查找任意位置的 Languages 文件夹 (e.g., /Common/Languages)
-    for p in mod_path.glob('**/Languages'):
-        lang_path = p / lang_folder
-        if lang_path.is_dir():
-            # 找到第一个就返回，因为glob的结果是无序的
-            return sorted(list(lang_path.rglob("*.xml")))
+    # 2. 查找所有版本目录，后面的会覆盖前面的
+    for version in TARGET_RIMWORLD_VERSIONS:
+        version_lang_path = mod_path / version / "Languages" / lang_folder
+        if version_lang_path.is_dir():
+            for f in version_lang_path.rglob("*.xml"):
+                found_files[f.name] = f  # 版本化文件覆盖根文件
 
-    return []
+    if not found_files:
+        for p in mod_path.glob('**/Languages'):
+            lang_path = p / lang_folder
+            if lang_path.is_dir():
+                return sorted(list(lang_path.rglob("*.xml")))
+
+    return sorted(list(found_files.values()))
 
 
 def load_xml_as_dict(file_path: Path) -> Dict[str, str]:
@@ -590,9 +651,11 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
         root_path = mod_path / folder_name
         if root_path.is_dir():
             root_files.extend(root_path.rglob("*.xml"))
-        version_path = mod_path / TARGET_RIMWORLD_VERSION / folder_name
-        if version_path.is_dir():
-            version_files.extend(version_path.rglob("*.xml"))
+        # --- 关键修改: 循环所有目标版本 ---
+        for version in TARGET_RIMWORLD_VERSIONS:
+            version_path = mod_path / version / folder_name
+            if version_path.is_dir():
+                version_files.extend(version_path.rglob("*.xml"))
 
     files_to_scan_in_order = root_files + version_files
     if not files_to_scan_in_order: return
