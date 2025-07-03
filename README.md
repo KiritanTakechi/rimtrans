@@ -123,6 +123,9 @@ slow_mode = true
 常见问题 (FAQ)
 
 遇到429 RESOURCE_EXHAUSTED错误怎么办?
+
 这是API频率限制。请在您的.toml文件中找到[system]部分，添加或确保slow_mode = true，然后重新运行脚本。
+
 提示FileNotFoundError: steamcmd?
+
 请检查您.toml文件中steamcmd_path的路径是否正确，建议使用绝对路径。
