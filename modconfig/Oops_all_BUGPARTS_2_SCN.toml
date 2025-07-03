@@ -1,0 +1,37 @@
+# 这是一个RimWorld汉化包的项目配置文件示例
+
+# [1] 汉化包本身的信息
+[pack_info]
+name = "Oops all BUGPARTS 2 SCN"
+author = "Kiritan"
+description = """
+这是一个自动生成的汉化包，为以下Mod提供简体中文支持：
+""" # 使用三个引号可以创建多行字符串
+
+# [2] 目标版本 (可以有多个)
+[versions]
+targets = ["1.5", "1.6"]
+
+# [3] Mod的Steam Workshop ID
+[mod_ids]
+# 需要汉化的Mod ID列表，用逗号分隔
+translate = "2896673577"
+
+# 作为翻译记忆库的旧汉化Mod ID列表 (可选)
+previous = "3515389487"
+
+# [4] 翻译规则
+[rules]
+# 可被注入翻译的XML标签
+translatable_def_tags = [
+    'label', 'description', 'jobString', 'reportString', 'verb', 'gerund',
+    'notification', 'letterLabel', 'letterText', 'statement', 'beginLetter',
+]
+
+# [5] 系统级配置 (可选，如果不存在，脚本会使用默认值)
+[system]
+slow_mode = true
+# steamcmd_path = "./steamcmd/steamcmd.sh"
+# steam_user = "anonymous"
+# steam_password = ""
+# gemini_model = "gemini-1.5-flash-latest"
