@@ -4,7 +4,7 @@ import sys
 import subprocess
 import time
 import json
-import xml.etree.ElementTree as ET
+from lxml import etree
 from pathlib import Path
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional
@@ -50,7 +50,7 @@ BASE_WORKING_DIR: Path = Path(__file__).parent
 OUTPUT_PATH: Path = BASE_WORKING_DIR / "translation_output"
 
 # 9. Gemini API 配置
-GEMINI_MODEL: str = "gemini-2.5-flash-lite-preview-06-17"
+GEMINI_MODEL: str = "gemini-2.5-flash"
 
 # 10. RimWorld 核心术语表
 RIMWORLD_GLOSSARY = {
@@ -275,7 +275,7 @@ def get_mod_info(mod_path: Path) -> Optional[Dict[str, str]]:
     if not about_file.is_file():
         return None
     try:
-        tree = ET.parse(about_file)
+        tree = etree.parse(str(about_file))
         root = tree.getroot()
         name_node = root.find("name")
         package_id_node = root.find("packageId")
@@ -294,7 +294,7 @@ def get_mod_info(mod_path: Path) -> Optional[Dict[str, str]]:
         package_id = package_id_node.text.strip() if package_id_node is not None and package_id_node.text else f"{author}.{safe_name_for_id}"
 
         return {"name": name, "packageId": package_id.lower()}
-    except ET.ParseError:
+    except etree.XMLSyntaxError:
         return None
 
 
@@ -397,16 +397,18 @@ def find_language_files(mod_path: Path, lang_folder: str) -> List[Path]:
 
 
 def load_xml_as_dict(file_path: Path) -> Dict[str, str]:
-    """将 RimWorld 语言 XML 文件解析为字典。"""
+    """将 RimWorld 语言 XML 文件解析为字典 (使用 lxml)。"""
     translations = {}
     try:
-        tree = ET.parse(file_path)
+        parser = etree.XMLParser(remove_blank_text=True)
+        tree = etree.parse(str(file_path), parser)
         root = tree.getroot()
-        for elem in root.findall('./*'):
-            if elem.text and elem.text.strip():
+        for elem in root:
+            # --- 修正点: 确保只处理元素节点，忽略注释等 ---
+            if isinstance(elem.tag, str) and elem.text:
                 translations[elem.tag] = elem.text.strip()
-    except ET.ParseError:
-        print(f"警告: 解析 XML 文件失败: {file_path}")
+    except etree.XMLSyntaxError as e:
+        print(f"警告: lxml解析文件失败: {file_path}, 错误: {e}")
     return translations
 
 
@@ -434,29 +436,29 @@ def build_translation_memory(mod_ids: List[str], workshop_path: Path) -> Dict[st
 
 
 def get_setup_prompt() -> str:
-    """构建用于初始化对话历史的系统指令和术语表。"""
+    """构建用于初始化对话历史的系统指令和术语表，并加入换行符标记规则。"""
     base_system_prompt = """你是一个为游戏《环世界》(RimWorld) 设计的专业级翻译引擎。你的任务是将用户提供的JSON对象中的 `source_text` 字段翻译成简体中文，并填入 `translated_text` 字段。
 请严格遵守以下规则：
 1.  **保持键值不变**: 绝对不要修改 `key` 字段和 `source_text` 字段。
 2.  **精准翻译**: 确保翻译内容符合《环世界》的语境。
-3.  **返回完整JSON**: 你的输出必须是完整的、包含所有原始条目的JSON数组，即使某些条目已经有翻译或无需翻译。
-4.  **保留换行符**: 文本中的换行符 `\n` 是有意义的，必须在翻译后的文本中精确地保留。不要将它们转换为空格或删除。"""
+3.  **返回完整JSON**: 你的输出必须是完整的、包含所有原始条目的JSON数组。
+4.  **处理换行符标记**: 文本中的 `[BR]` 标记是一个特殊的换行符占位符。在翻译时，必须在对应的位置原封不动地保留 `[BR]` 标记。绝对不能翻译或删除它。"""
 
     glossary_prompt_part = "5. **术语统一**: 这是最重要的规则。请严格参考以下术语表进行翻译，确保关键词的统一性：\n"
     glossary_items = [f"- '{en.lower()}': '{cn}'" for en, cn in RIMWORLD_GLOSSARY.items()]
     glossary_prompt_part += "\n".join(glossary_items)
 
-    return f"{base_system_prompt}\n\n{glossary_prompt_part}"
+    return f"{base_system_prompt}\n\n{glossary_prompt_part}\n\n我明白了这些规则（特别是处理 `[BR]` 标记），请开始提供需要翻译的JSON内容。"
 
 
 def convert_dict_to_json_items(data: Dict[str, str]) -> List[Dict[str, str]]:
-    """将Python字典转换为用于JSON输入的列表。"""
-    return [{"key": k, "source_text": v, "translated_text": ""} for k, v in data.items()]
+    """将Python字典转换为用于JSON输入的列表，并将\n替换为[BR]标记。"""
+    return [{"key": k, "source_text": v.replace('\n', '[BR]'), "translated_text": ""} for k, v in data.items()]
 
 
 def convert_parsed_json_to_dict(parsed_items: List[TranslationItem]) -> Dict[str, str]:
-    """将API返回的Pydantic对象列表转换为Python字典。"""
-    return {item.key: item.translated_text for item in parsed_items}
+    """将API返回的Pydantic对象列表转换为Python字典，并将[BR]标记替换回\n。"""
+    return {item.key: item.translated_text.replace('[BR]', '\n') for item in parsed_items}
 
 
 def translate_with_json_mode(client: genai.Client, history: List[types.Content],
@@ -493,21 +495,21 @@ def translate_with_json_mode(client: genai.Client, history: List[types.Content],
 
 def translate_and_save(client: genai.Client, history: List[types.Content], targets: Dict[str, str],
                        memory: Dict[str, str], output_file_path: Path):
+    """通用翻译和保存逻辑 (使用“标记-替换”策略)。"""
     to_translate_dict = {k: v for k, v in targets.items() if k not in memory}
     final_translation_dict = {k: memory[k] for k, v in targets.items() if k in memory}
 
     if to_translate_dict:
+        # 预处理：将\n替换为[BR]标记
         json_items_to_translate = convert_dict_to_json_items(to_translate_dict)
         time.sleep(1)
 
-        # `parsed_result` 现在是 `List[TranslationItem]` 或 `None`
         parsed_result = translate_with_json_mode(client, history, json_items_to_translate)
 
         if parsed_result:
+            # 后处理：将[BR]标记替换回\n
             translated_dict = convert_parsed_json_to_dict(parsed_result)
 
-            # --- 修正点: 更新历史记录时，也使用包装器结构 ---
-            # 创建一个临时的TranslationResponse对象来生成正确的历史记录JSON
             response_for_history = TranslationResponse(translations=parsed_result)
             history.append(
                 types.Content(role="user", parts=[types.Part.from_text(text=json.dumps(json_items_to_translate))]))
@@ -527,14 +529,21 @@ def translate_and_save(client: genai.Client, history: List[types.Content], targe
     if not final_translation_dict: return
 
     output_file_path.parent.mkdir(parents=True, exist_ok=True)
-    root = ET.Element("LanguageData")
+    root = etree.Element("LanguageData")
     for key in targets:
         if key in final_translation_dict:
-            node = ET.SubElement(root, key)
-            node.text = final_translation_dict[key]
-    tree = ET.ElementTree(root)
-    ET.indent(tree, space="  ", level=0)
-    tree.write(output_file_path, encoding='utf-8', xml_declaration=True)
+            node = etree.SubElement(root, key)
+            text_content = final_translation_dict[key]
+
+            # --- 关键修正点: 使用 CDATA 包装包含换行符的文本 ---
+            if '\n' in text_content:
+                node.text = etree.CDATA(text_content)
+            else:
+                node.text = text_content
+            # --- 修正结束 ---
+
+    tree = etree.ElementTree(root)
+    tree.write(str(output_file_path), encoding='utf-8', xml_declaration=True, pretty_print=True)
 
 
 def process_standard_translation(client: genai.Client, history: List[types.Content], mod_path: Path, mod_info: Dict, memory: Dict, output_path: Path):
@@ -553,27 +562,40 @@ def process_standard_translation(client: genai.Client, history: List[types.Conte
         translate_and_save(client, history, targets, memory, output_file_path)
 
 
-def process_def_injection_translation(client: genai.Client, history: List[types.Content], mod_path: Path, mod_info: Dict, memory: Dict, output_path: Path):
+def process_def_injection_translation(client: genai.Client, history: List[types.Content], mod_path: Path,
+                                      mod_info: Dict, memory: Dict, output_path: Path):
+    """处理 Defs/ 文件夹中的注入式翻译 (使用 lxml)。"""
     def_files = list(mod_path.rglob("Defs/**/*.xml"))
     if not def_files: return
+
     print(f"  -> 找到 {len(def_files)} 个定义(Defs)文件，在当前会话中扫描注入点...")
     for file_path in def_files:
         targets = {}
         try:
-            tree = ET.parse(file_path)
-            for element in tree.getroot().findall("./*"):
+            parser = etree.XMLParser(remove_blank_text=True)
+            tree = etree.parse(str(file_path), parser)
+            for element in tree.getroot():
+                # --- 修正点: 确保只处理元素节点 ---
+                if not isinstance(element.tag, str):
+                    continue
+
                 def_name_node = element.find("defName")
                 if def_name_node is None or not def_name_node.text: continue
                 def_name = def_name_node.text.strip()
+
                 for sub_element in element:
-                    if sub_element.tag in TRANSLATABLE_DEF_TAGS and sub_element.text:
+                    if isinstance(sub_element.tag,
+                                  str) and sub_element.tag in TRANSLATABLE_DEF_TAGS and sub_element.text:
                         targets[f"{def_name}.{sub_element.tag}"] = sub_element.text.strip()
-        except ET.ParseError: continue
+        except etree.XMLSyntaxError:
+            continue
         if not targets: continue
+
         print(f"    -> 在 {file_path.name} 中发现 {len(targets)} 个可注入字段。")
         relative_def_path = file_path.relative_to(mod_path)
         safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
         output_file_path = output_path / "Cont" / safe_mod_name / "Languages" / "ChineseSimplified" / "DefInjected" / relative_def_path
+
         translate_and_save(client, history, targets, memory, output_file_path)
 
 
