@@ -5,6 +5,9 @@ import subprocess
 import time
 import json
 
+import argparse
+import tomllib
+
 from PIL import Image, ImageDraw, ImageFont
 from lxml import etree
 from pathlib import Path
@@ -16,45 +19,22 @@ from google.genai import types
 from tqdm import tqdm
 
 # --- 全局配置 (请根据你的情况修改) ---
+DEFAULT_CONFIG = {
+    "system": {
+        "steamcmd_path": "./steamcmd/steamcmd.sh",
+        "steam_user": "anonymous",
+        "steam_password": "",
+        "windows_steam_path": "C:/Program Files (x86)/Steam",
+        "rimworld_app_id": "294100",
+        "gemini_model": "gemini-2.5-flash"
+    }
+}
 
-# 1. 汉化包 Mod 的信息 (请自定义)
-TRANSLATION_MOD_NAME: str = "Big and Small SCN"
-TRANSLATION_MOD_AUTHOR: str = "Kiritan"
-TRANSLATION_MOD_DESCRIPTION: str = "这是一个自动生成的汉化包，为以下Mod提供简体中文支持：\n\n"
-TARGET_RIMWORLD_VERSIONS: List[str] = ["1.5", "1.6"]
-
-# 2. 上一个版本的汉化文件 (可选, 可为空)
-PREVIOUS_TRANSLATION_IDS: str = ""
-
-# 3. 需要汉化的 Mod (必需)
-MODS_TO_TRANSLATE_IDS: str = "2925432336,2920751126,2894397737,2908225858,2926556467,3024478368,3027202907,3073163708,3105907309,3170117364,3218636337,3328662155,3328812977,3360323573,3360783902,3434275463,3505241400"
-
-# 4. 可被注入翻译的XML标签列表 (可按需添加)
-TRANSLATABLE_DEF_TAGS = [
-    'label', 'description', 'jobString', 'reportString', 'verb', 'gerund',
-    'notification', 'letterLabel', 'letterText', 'statement', 'beginLetter'
-]
-
-# 5. SteamCMD 配置
-STEAMCMD_PATH: str = "./steamcmd/steamcmd.sh"  # macOS/Linux 示例
-# STEAMCMD_PATH: str = "C:/steamcmd/steamcmd.exe" # Windows 示例
-STEAM_USERNAME: str = "anonymous"
-STEAM_PASSWORD: str = ""
-
-# 6. Windows Steam 安装路径 (仅当在 Windows 上运行且 Steam 未安装在默认位置时需要修改)
-STEAM_INSTALL_PATH_WINDOWS: str = "C:/Program Files (x86)/Steam"
-
-# 7. RimWorld 在 Steam 上的 App ID
-RIMWORLD_APP_ID: str = "294100"
-
-# 8. 输出目录
+# 输出目录
 BASE_WORKING_DIR: Path = Path(__file__).parent
 OUTPUT_PATH: Path = BASE_WORKING_DIR / "translation_output"
 
-# 9. Gemini API 配置
-GEMINI_MODEL: str = "gemini-2.5-flash"
-
-# 10. RimWorld 核心术语表
+# RimWorld 核心术语表
 RIMWORLD_GLOSSARY = {
     "Addictiveness": "成瘾性", "AI Kassandra": "AI故事叙述者", "AI Persona Core": "人工智能思维核心", "AI Storytellers": "AI故事叙述者",
     "Advanced Weapons": "高级武器", "Agave": "龙舌兰果", "Aiming Time": "瞄准时间", "Allowed area": "许可区域", "Alpaca": "羊驼",
@@ -172,7 +152,7 @@ def get_workshop_content_path() -> Path:
 
     if platform == "win32":
         # Windows: 通常在 Steam 安装目录下
-        path = Path(STEAM_INSTALL_PATH_WINDOWS) / "steamapps" / "workshop" / "content"
+        path = Path(CONFIG['system']['windows_steam_path']) / "steamapps" / "workshop" / "content"
     elif platform == "darwin":
         # macOS
         path = home / "Library/Application Support/Steam/steamapps/workshop/content"
@@ -208,12 +188,12 @@ def setup_environment():
         print(f"错误: Gemini API 客户端初始化失败: {e}")
         sys.exit(1)
 
-    if not Path(STEAMCMD_PATH).is_file():
-        print(f"错误: 在路径 '{STEAMCMD_PATH}' 未找到 SteamCMD。")
+    if not Path(CONFIG['system']['steamcmd_path']).is_file():
+        print(f"错误: 在路径 '{CONFIG['system']['steamcmd_path']}' 未找到 SteamCMD。")
         sys.exit(1)
 
-    if not MODS_TO_TRANSLATE_IDS:
-        print("错误: 'MODS_TO_TRANSLATE_IDS' 不能为空。")
+    if not CONFIG['mod_ids']['translate']:
+        print("错误: 'CONFIG['mod_ids']['translate']' 不能为空。")
         sys.exit(1)
 
     OUTPUT_PATH.mkdir(exist_ok=True)
@@ -234,11 +214,11 @@ def download_with_steamcmd(mod_ids: List[str]):
         return
 
     print(f"--- 开始使用 SteamCMD 下载 {len(mod_ids)} 个 Mod ---")
-    command = [STEAMCMD_PATH, "+login", STEAM_USERNAME, STEAM_PASSWORD]
+    command = [CONFIG['system']['steamcmd_path'], "+login", CONFIG['system']['steam_user'], CONFIG['system']['steam_password']]
 
     for mod_id in mod_ids:
         print(f"准备下载 Mod ID: {mod_id}")
-        command.extend(["+workshop_download_item", RIMWORLD_APP_ID, mod_id])
+        command.extend(["+workshop_download_item", CONFIG['system']['rimworld_app_id'], mod_id])
     command.append("+quit")
 
     try:
@@ -263,7 +243,7 @@ def download_with_steamcmd(mod_ids: List[str]):
             print("\n所有 Mod 下载任务已提交。")
 
     except FileNotFoundError:
-        print(f"错误: 无法执行 SteamCMD。路径 '{STEAMCMD_PATH}' 是否正确？")
+        print(f"错误: 无法执行 SteamCMD。路径 '{CONFIG['system']['steamcmd_path']}' 是否正确？")
         sys.exit(1)
     except Exception as e:
         print(f"SteamCMD 执行时发生未知错误: {e}")
@@ -367,28 +347,28 @@ def create_about_file(output_path: Path, mod_info_map: Dict[str, dict]):
     root = etree.Element("ModMetaData")
 
     # 2. 添加子节点和内容
-    etree.SubElement(root, "name").text = TRANSLATION_MOD_NAME
-    etree.SubElement(root, "author").text = TRANSLATION_MOD_AUTHOR
+    etree.SubElement(root, "name").text = CONFIG['pack_info']['name']
+    etree.SubElement(root, "author").text = CONFIG['pack_info']['author']
 
     supported_versions_node = etree.SubElement(root, "supportedVersions")
-    for version in TARGET_RIMWORLD_VERSIONS:
+    for version in CONFIG['versions']['targets']:
         etree.SubElement(supported_versions_node, "li").text = version
 
-    package_id = f"{TRANSLATION_MOD_AUTHOR.replace(' ', '')}.{TRANSLATION_MOD_NAME.replace(' ', '')}"
+    package_id = f"{CONFIG['pack_info']['author'].replace(' ', '')}.{CONFIG['pack_info']['name'].replace(' ', '')}"
     etree.SubElement(root, "packageId").text = package_id
 
     supported_mods_list = "\n".join([f"  - {info['name']}" for info in mod_info_map.values()])
-    full_description = TRANSLATION_MOD_DESCRIPTION + supported_mods_list
+    full_description = CONFIG['pack_info']['description'] + supported_mods_list
 
     etree.SubElement(root, "description").text = full_description
 
     # 3. 循环添加依赖项
-    dependencies_node = etree.SubElement(root, "modDependencies")
-    for mod_info in mod_info_map.values():
-        li_node = etree.SubElement(dependencies_node, "li")
-        etree.SubElement(li_node, "packageId").text = mod_info['packageId']
-        etree.SubElement(li_node, "displayName").text = mod_info['name']
-        etree.SubElement(li_node, "steamWorkshopUrl").text = f"steam://url/CommunityFilePage/{mod_info['id']}"
+    # dependencies_node = etree.SubElement(root, "modDependencies")
+    # for mod_info in mod_info_map.values():
+    #     li_node = etree.SubElement(dependencies_node, "li")
+    #     etree.SubElement(li_node, "packageId").text = mod_info['packageId']
+    #     etree.SubElement(li_node, "displayName").text = mod_info['name']
+    #     etree.SubElement(li_node, "steamWorkshopUrl").text = f"steam://url/CommunityFilePage/{mod_info['id']}"
 
     # 4. 循环添加加载顺序
     load_after_node = etree.SubElement(root, "loadAfter")
@@ -406,14 +386,14 @@ def create_about_file(output_path: Path, mod_info_map: Dict[str, dict]):
     (about_dir / "PublishedFileId.txt").touch()
     print("生成 About/About.xml。")
 
-    create_placeholder_images(about_dir, TRANSLATION_MOD_NAME, TRANSLATION_MOD_AUTHOR)
+    create_placeholder_images(about_dir, CONFIG['pack_info']['name'], CONFIG['pack_info']['author'])
 
 
 def create_load_folders_file(output_path: Path, mod_info_map: Dict[str, dict]):
     """创建LoadFolders.xml文件 (lxml版本)。"""
     root = etree.Element("loadFolders")
 
-    for version in TARGET_RIMWORLD_VERSIONS:
+    for version in CONFIG['versions']['targets']:
         version_node = etree.SubElement(root, f"v{version}")
         for mod_info in mod_info_map.values():
             safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
@@ -439,8 +419,8 @@ def create_self_translation(output_path: Path):
     root = etree.Element("LanguageData")
 
     # 动态生成tag名
-    tag_name = f"{TRANSLATION_MOD_AUTHOR.replace(' ', '')}.{TRANSLATION_MOD_NAME.replace(' ', '')}.ModName"
-    etree.SubElement(root, tag_name).text = TRANSLATION_MOD_NAME
+    tag_name = f"{CONFIG['pack_info']['author'].replace(' ', '')}.{CONFIG['pack_info']['name'].replace(' ', '')}.ModName"
+    etree.SubElement(root, tag_name).text = CONFIG['pack_info']['name']
 
     tree = etree.ElementTree(root)
     tree.write(
@@ -463,7 +443,7 @@ def find_language_files(mod_path: Path, lang_folder: str) -> List[Path]:
             found_files[f.name] = f
 
     # 2. 查找所有版本目录，后面的会覆盖前面的
-    for version in TARGET_RIMWORLD_VERSIONS:
+    for version in CONFIG['versions']['targets']:
         version_lang_path = mod_path / version / "Languages" / lang_folder
         if version_lang_path.is_dir():
             for f in version_lang_path.rglob("*.xml"):
@@ -501,7 +481,7 @@ def build_translation_memory(mod_ids: List[str], workshop_path: Path) -> Dict[st
 
     print("--- 正在构建翻译记忆库 ---")
     memory = {}
-    mod_content_path = workshop_path / RIMWORLD_APP_ID
+    mod_content_path = workshop_path / CONFIG['system']['rimworld_app_id']
 
     for mod_id in tqdm(mod_ids, desc="处理旧汉化"):
         mod_path = mod_content_path / mod_id
@@ -560,7 +540,7 @@ def translate_with_json_mode(client: genai.Client, history: List[types.Content],
 
     try:
         response = client.models.generate_content(
-            model=GEMINI_MODEL,
+            model=CONFIG['system']['gemini_model'],
             contents=current_contents,
             # 这是JSON模式的核心配置
             config=types.GenerateContentConfig(
@@ -652,7 +632,7 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
         if root_path.is_dir():
             root_files.extend(root_path.rglob("*.xml"))
         # --- 关键修改: 循环所有目标版本 ---
-        for version in TARGET_RIMWORLD_VERSIONS:
+        for version in CONFIG['versions']['targets']:
             version_path = mod_path / version / folder_name
             if version_path.is_dir():
                 version_files.extend(version_path.rglob("*.xml"))
@@ -678,7 +658,7 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
             if any(char in def_name for char in invalid_chars): continue
 
             for sub_element in element:
-                if isinstance(sub_element.tag, str) and sub_element.tag in TRANSLATABLE_DEF_TAGS and sub_element.text:
+                if isinstance(sub_element.tag, str) and sub_element.tag in CONFIG['rules']['translatable_def_tags'] and sub_element.text:
                     if def_type not in group_dict: group_dict[def_type] = {}
                     source_filename = source_file_path.name
                     if source_filename not in group_dict[def_type]: group_dict[def_type][source_filename] = {}
@@ -721,16 +701,19 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
             translate_and_save(client, history, targets, memory, output_file_path)
 
 
-def main():
+def main(loaded_config: dict):
     """脚本主入口，采用“每Mod一会话(通过手动历史记录)”+“JSON结构化输出”模式。"""
+    global CONFIG
+    CONFIG = loaded_config
+
     client = setup_environment()
     workshop_path = get_workshop_content_path()
-    prev_ids = parse_ids(PREVIOUS_TRANSLATION_IDS)
-    new_ids = parse_ids(MODS_TO_TRANSLATE_IDS)
+    prev_ids = parse_ids(CONFIG['mod_ids']['previous'])
+    new_ids = parse_ids(CONFIG['mod_ids']['translate'])
     download_with_steamcmd(list(set(prev_ids + new_ids)))
 
     mod_info_map = {}
-    mod_content_path = workshop_path / RIMWORLD_APP_ID
+    mod_content_path = workshop_path / CONFIG['system']['rimworld_app_id']
     print("\n--- 正在收集待汉化Mod的元数据 ---")
     for mod_id in new_ids:
         mod_path = mod_content_path / mod_id
@@ -741,7 +724,7 @@ def main():
             mod_info_map[mod_id] = info
             print(f"  > 找到Mod: {info['name']} (packageId: {info['packageId']})")
 
-    output_path = OUTPUT_PATH / TRANSLATION_MOD_NAME.replace(" ", "_")
+    output_path = OUTPUT_PATH / CONFIG['pack_info']['name'].replace(" ", "_")
     output_path.mkdir(exist_ok=True, parents=True)
     print(f"\n汉化包将生成在: {output_path.resolve()}")
 
@@ -773,9 +756,78 @@ def main():
         print(f"<<< Mod '{mod_info['name']}' 的会话处理完毕。")
 
     print("\n--- 所有任务完成！---")
-    print(f"汉化包 '{TRANSLATION_MOD_NAME}' 已在以下路径生成完毕: \n{output_path.resolve()}")
+    print(f"汉化包 '{CONFIG['pack_info']['name']}' 已在以下路径生成完毕: \n{output_path.resolve()}")
     print("现在您可以将此文件夹移动到您的 RimWorld/Mods 目录进行测试，或上传到Steam创意工坊。")
 
 
+def load_config(config_path: str) -> dict:
+    """加载并合并TOML配置文件。"""
+    print(f"--- 正在从 {config_path} 加载配置 ---")
+    try:
+        with open(config_path, "rb") as f:
+            user_config = tomllib.load(f)
+    except FileNotFoundError:
+        print(f"错误: 配置文件不存在于路径: {config_path}"); sys.exit(1)
+    except tomllib.TOMLDecodeError as e:
+        print(f"错误: 配置文件格式无效: {e}"); sys.exit(1)
+
+    config = DEFAULT_CONFIG.copy()
+    if 'system' in user_config:
+        config['system'].update(user_config['system'])
+
+    for section in ['pack_info', 'versions', 'mod_ids', 'rules']:
+        if section not in user_config:
+            print(f"错误: 配置文件中缺少必需的部分: [{section}]")
+            sys.exit(1)
+        config[section] = user_config[section]
+
+    print("配置加载成功。")
+    return config
+
+
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(
+        description="RimWorld Mod 自动化翻译脚本。可以处理单个.toml文件或一个包含多个.toml文件的目录。"
+    )
+    parser.add_argument(
+        "config_path",
+        type=str,
+        help="要使用的项目配置文件(.toml)或包含配置文件的目录的路径"
+    )
+    args = parser.parse_args()
+
+    # --- 核心修改：智能路径处理 ---
+    input_path = Path(args.config_path)
+    toml_files_to_process = []
+
+    if not input_path.exists():
+        print(f"错误: 提供的路径不存在: {input_path}")
+        sys.exit(1)
+
+    if input_path.is_dir():
+        print(f"检测到目录输入，将处理该目录下的所有 .toml 文件...")
+        toml_files_to_process = sorted(list(input_path.glob("*.toml")))
+        if not toml_files_to_process:
+            print(f"警告: 在目录 '{input_path}' 中未找到任何 .toml 配置文件。")
+    elif input_path.is_file():
+        if input_path.suffix.lower() == ".toml":
+            toml_files_to_process.append(input_path)
+        else:
+            print(f"错误:提供的文件不是 .toml 文件: {input_path}")
+
+    if not toml_files_to_process:
+        print("没有找到要处理的配置文件，程序退出。")
+        sys.exit(0)
+
+    # --- 批量处理循环 ---
+    total_files = len(toml_files_to_process)
+    print(f"\n准备开始批量处理，共计 {total_files} 个项目。")
+
+    for i, config_file_path in enumerate(toml_files_to_process, 1):
+        print(f"\n{'=' * 25} 开始处理项目 {i}/{total_files} {'=' * 25}")
+        config_data = load_config(config_file_path)
+        if config_data:
+            main(config_data)
+        else:
+            print(f"跳过项目 {config_file_path.name}，因为配置加载失败。")
+        print(f"{'=' * 25} 项目 {config_file_path.name} 处理完毕 {'=' * 25}")
