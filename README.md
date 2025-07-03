@@ -120,7 +120,7 @@ slow_mode = true
 上传至创意工坊
 确认无误后，参考之前提供的游戏内上传指南，将您的汉化包发布到Steam创意工坊。
 
-常见问题 (FAQ)
+## 常见问题 (FAQ)
 
 遇到429 RESOURCE_EXHAUSTED错误怎么办?
 
