@@ -284,45 +284,68 @@ def get_mod_info(mod_path: Path) -> Optional[Dict[str, str]]:
         return None
 
 
-def create_placeholder_images(about_dir: Path, mod_name: str, author_name: str):
-    """使用Pillow库创建占位符Preview.png和ModIcon.png。"""
+def create_placeholder_images(about_dir: Path):
+    """使用Pillow库和自带的Inter字体创建占位符图片，并动态调整字体大小以适应文本。"""
     print("正在生成占位符图片...")
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        print("警告: Pillow库未安装，无法生成图片。请运行 'pip install Pillow'。")
+        return
 
-    # 尝试加载一个通用字体，如果失败则使用Pillow的默认字体
+    mod_name = CONFIG['pack_info']['name']
+    author_name = CONFIG['pack_info']['author']
     font_path = Path(__file__).parent / "assets" / "Inter-Regular.ttf"
-
-    if not font_path.is_file():
-        print(f"警告: 找不到字体文件 {font_path}。")
-        print("请按说明创建assets文件夹并下载Inter字体，否则将使用效果不佳的默认字体。")
-        # 优雅降级，使用默认字体
-        try:
-            title_font = ImageFont.load_default(size=30)
-            subtitle_font = ImageFont.load_default(size=15)
-            icon_font = ImageFont.load_default(size=20)
-        except AttributeError:  # 老版本Pillow的load_default没有size参数
-            title_font = ImageFont.load_default()
-            subtitle_font = ImageFont.load_default()
-            icon_font = ImageFont.load_default()
-    else:
-        title_font = ImageFont.truetype(str(font_path), 60)
-        subtitle_font = ImageFont.truetype(str(font_path), 30)
-        icon_font = ImageFont.truetype(str(font_path), 40)
 
     # --- 生成 Preview.png ---
     preview_size = (640, 360)
-    preview_bg_color = (48, 48, 64)  # 深蓝色背景
+    preview_bg_color = (48, 48, 64)
     text_color = (255, 255, 255)
 
     preview_image = Image.new('RGB', preview_size, preview_bg_color)
     draw = ImageDraw.Draw(preview_image)
 
-    # 绘制Mod名称
+    # --- 标题字体动态大小逻辑 ---
+    font_size = 60  # 初始最大字体大小
+    title_font = None
+    padding = 40  # 图片左右留白
+
+    while font_size > 10:  # 最小字体限制
+        try:
+            if font_path.is_file():
+                title_font = ImageFont.truetype(str(font_path), font_size)
+            else:  # 字体文件不存在，使用默认字体并跳出循环
+                title_font = ImageFont.load_default(size=30 if font_size > 20 else 15)
+                break
+        except Exception:  # 字体加载异常
+            title_font = ImageFont.load_default()
+            break
+
+        title_bbox = draw.textbbox((0, 0), mod_name, font=title_font)
+        text_width = title_bbox[2] - title_bbox[0]
+
+        if text_width < preview_size[0] - padding:
+            # 如果宽度合适，就用这个字体大小
+            break
+
+        font_size -= 2  # 否则，缩小字体再试
+
+    # 使用最终计算好的字体大小来绘制文本
     title_bbox = draw.textbbox((0, 0), mod_name, font=title_font)
     title_width = title_bbox[2] - title_bbox[0]
-    title_pos = ((preview_size[0] - title_width) / 2, 120)
+    title_height = title_bbox[3] - title_bbox[1]
+    title_pos = ((preview_size[0] - title_width) / 2, 140 - (title_height / 2))  # 垂直居中
     draw.text(title_pos, mod_name, fill=text_color, font=title_font)
 
-    # 绘制作者信息
+    # 绘制作者信息 (通常不需要动态大小，但依然使用try-except)
+    try:
+        if font_path.is_file():
+            subtitle_font = ImageFont.truetype(str(font_path), 30)
+        else:
+            subtitle_font = ImageFont.load_default(size=15)
+    except Exception:
+        subtitle_font = ImageFont.load_default()
+
     subtitle_text = f"Translation by {author_name}"
     subtitle_bbox = draw.textbbox((0, 0), subtitle_text, font=subtitle_font)
     subtitle_width = subtitle_bbox[2] - subtitle_bbox[0]
@@ -336,19 +359,27 @@ def create_placeholder_images(about_dir: Path, mod_name: str, author_name: str):
     icon_image = Image.new('RGB', icon_size, preview_bg_color)
     draw = ImageDraw.Draw(icon_image)
 
-    # 截取Mod名的前几个字母作为图标
-    icon_text = "".join([word[0] for word in mod_name.split()[:2]]).upper()
-    if not icon_text:
-        icon_text = mod_name[0].upper() if mod_name else "T"
+    icon_text = "".join([word[0] for word in mod_name.split()[:2]]).upper() or (
+        mod_name[0].upper() if mod_name else "T")
 
+    try:
+        if font_path.is_file():
+            icon_font = ImageFont.truetype(str(font_path), 120)  # 图标字体可以大一些
+        else:
+            icon_font = ImageFont.load_default(size=40)
+    except Exception:
+        icon_font = ImageFont.load_default()
+
+    # 简单处理，通常图标文字不会超出
     icon_bbox = draw.textbbox((0, 0), icon_text, font=icon_font)
     icon_width = icon_bbox[2] - icon_bbox[0]
     icon_height = icon_bbox[3] - icon_bbox[1]
-    icon_pos = ((icon_size[0] - icon_width) / 2, (icon_size[1] - icon_height) / 2)
+    # 进行轻微的垂直偏移，让文字视觉上更居中
+    icon_pos = ((icon_size[0] - icon_width) / 2, (icon_size[1] - icon_height) / 2 - (icon_font.size * 0.1))
     draw.text(icon_pos, icon_text, fill=text_color, font=icon_font)
 
     icon_image.save(about_dir / "ModIcon.png")
-    print("  -> 已自动生成 Preview.png 和 ModIcon.png。")
+    print("  -> 已自动生成自适应文本大小的 Preview.png 和 ModIcon.png。")
 
 
 def create_about_file(output_path: Path, mod_info_map: Dict[str, dict]):
@@ -498,12 +529,12 @@ def load_xml_as_dict(file_path: Path) -> Dict[str, str]:
     return translations
 
 
-def build_translation_memory(prev_ids: List[str], workshop_path: Path) -> Dict[str, str]:
-    """从旧汉化文件中构建翻译记忆库"""
+def build_translation_memory(prev_ids: List[str], workshop_path: Path) -> Dict[str, dict]:
+    """从旧汉化包的translation_cache.json文件中构建三方校对记忆库。"""
     if not prev_ids:
         return {}
 
-    print("--- 正在构建翻译记忆库 ---")
+    print("--- 正在构建三方校对记忆库 ---")
     memory = {}
     mod_content_path = workshop_path / CONFIG['system']['rimworld_app_id']
 
@@ -513,44 +544,23 @@ def build_translation_memory(prev_ids: List[str], workshop_path: Path) -> Dict[s
             print(f"\n警告: 找不到 Mod {mod_id} 的下载目录，跳过。")
             continue
 
-        # --- 全新的、更全面的文件扫描逻辑 ---
-        files_to_load = []
-        # 1. 查找根目录下的Languages文件夹
-        files_to_load.extend(find_language_files(mod_path, "ChineseSimplified"))
+        cache_files = list(mod_path.rglob("translation_cache.json"))
 
-        # 2. 查找并遍历Cont文件夹下的所有子Mod
-        cont_path = mod_path / "Cont"
-        if cont_path.is_dir():
-            for sub_mod_dir in cont_path.iterdir():
-                if sub_mod_dir.is_dir():
-                    files_to_load.extend(find_language_files(sub_mod_dir, "ChineseSimplified"))
-
-        # 使用字典去重，确保每个文件只处理一次
-        unique_files = list(dict.fromkeys(files_to_load))
-        # --- 扫描逻辑结束 ---
-
-        if not unique_files:
-            print(f"\n[记忆库] 在Mod '{mod_id}' 中未找到任何中文文件。")
+        if not cache_files:
+            print(f"\n[记忆库] 在Mod '{mod_id}' 中未找到 translation_cache.json 文件。")
             continue
 
-        print(f"\n[记忆库] 在Mod '{mod_id}' 中找到 {len(unique_files)} 个总的中文文件，开始加载...")
-        mod_total_entries = 0
-        for file_path in unique_files:
-            new_entries = load_xml_as_dict(file_path)
-            entry_count = len(new_entries)
-            if entry_count > 0:
-                relative_display_path = file_path.relative_to(mod_path)
-                print(f"  -> 从 {relative_display_path} 加载了 {entry_count} 个条目。")
-                memory.update(new_entries)
-                mod_total_entries += entry_count
-        print(f"[记忆库] Mod '{mod_id}' 加载完毕，共计 {mod_total_entries} 个条目。")
+        print(f"\n[记忆库] 在Mod '{mod_id}' 中找到 {len(cache_files)} 个缓存文件，开始加载...")
+        for file_path in cache_files:
+            try:
+                with file_path.open('r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    memory.update(data)
+            except (json.JSONDecodeError, IOError) as e:
+                print(f"  -> 警告: 读取或解析缓存文件失败: {file_path}, 错误: {e}")
 
     final_count = len(memory)
     print(f"\n构建完成！翻译记忆库包含 {final_count} 个条目。\n")
-
-    if final_count <= 1 and len(prev_ids) > 0:
-        print("!! 警告: 最终记忆库条目数可能过少。请检查上面的日志，确认是否正确找到了所有文件和条目。")
-
     return memory
 
 
@@ -638,26 +648,37 @@ def translate_with_json_mode(client: genai.Client, history: List[types.Content],
 
 
 def translate_and_save(client: genai.Client, history: List[types.Content], targets: Dict[str, str],
-                       memory: Dict[str, str], output_file_path: Path):
-    """通用翻译和保存逻辑，修复了当100%命中缓存时跳过写入的Bug。"""
+                       memory: Dict[str, dict], output_file_path: Path) -> Dict[str, dict]:
+    """
+    通用翻译和保存逻辑。
+    使用三方校对记忆库，并返回为新缓存准备的数据。
+    """
+    to_translate_dict = {}
+    final_translation_dict = {}
+    new_cache_data = {}
 
-    # 1. 初始化最终字典，并直接从记忆库加载所有能找到的翻译
-    final_translation_dict = {k: memory[k] for k, v in targets.items() if k in memory}
+    for key, new_en_text in targets.items():
+        if key in memory:
+            old_en_text = memory[key].get('en', '')
+            old_cn_text = memory[key].get('cn', '')
+            # 如果新旧英文一致，直接使用旧中文
+            if new_en_text == old_en_text:
+                final_translation_dict[key] = old_cn_text
+                new_cache_data[key] = {'en': new_en_text, 'cn': old_cn_text}
+            else:
+                # 英文原文已更新，需要重翻
+                to_translate_dict[key] = new_en_text
+        else:
+            # 全新条目，需要翻译
+            to_translate_dict[key] = new_en_text
 
-    # 2. 确定哪些条目是记忆库里没有，需要联网翻译的
-    to_translate_dict = {k: v for k, v in targets.items() if k not in memory}
-
-    # 3. 如果有需要联网翻译的条目，则执行API调用
     if to_translate_dict:
         json_items_to_translate = convert_dict_to_json_items(to_translate_dict)
-
-        # 应用慢速模式
         if CONFIG['system'].get('slow_mode', False):
             time.sleep(CONFIG['system'].get('slow_mode_delay', 2))
 
         parsed_result = translate_with_json_mode(client, history, json_items_to_translate)
 
-        # 处理API返回的结果
         if parsed_result:
             translated_dict = convert_parsed_json_to_dict(parsed_result)
             response_for_history = TranslationResponse(translations=parsed_result)
@@ -666,35 +687,39 @@ def translate_and_save(client: genai.Client, history: List[types.Content], targe
             history.append(
                 types.Content(role="model", parts=[types.Part.from_text(text=response_for_history.model_dump_json())]))
 
-            # 将新翻译的条目与从记忆库加载的条目合并
             for key, original_text in to_translate_dict.items():
-                if key in translated_dict and translated_dict[key]:
-                    final_translation_dict[key] = translated_dict[key]
+                translated_text = translated_dict.get(key)
+                if translated_text:
+                    final_translation_dict[key] = translated_text
+                    new_cache_data[key] = {'en': original_text, 'cn': translated_text}
                 else:
                     final_translation_dict[key] = f"【原文】{original_text}"
+                    new_cache_data[key] = {'en': original_text, 'cn': f"【原文】{original_text}"}
         else:
             for key, original_text in to_translate_dict.items():
                 final_translation_dict[key] = f"【API错误】{original_text}"
+                new_cache_data[key] = {'en': original_text, 'cn': f"【API错误】{original_text}"}
 
-    # 4. 只要最终字典里有内容（无论是来自记忆库还是新翻译），就执行写入
-    if not final_translation_dict: return
+    if not final_translation_dict: return {}
 
     output_file_path.parent.mkdir(parents=True, exist_ok=True)
     root = etree.Element("LanguageData")
-
-    # 按照原文的顺序写入，确保文件结构不变
     for key in targets:
         if key in final_translation_dict:
             node = etree.SubElement(root, key)
             node.text = final_translation_dict[key]
-
     tree = etree.ElementTree(root)
     tree.write(str(output_file_path), encoding='utf-8', xml_declaration=True, pretty_print=True)
 
+    return new_cache_data
 
-def process_standard_translation(client: genai.Client, history: List[types.Content], mod_path: Path, mod_info: Dict, memory: Dict, output_path: Path):
+
+def process_standard_translation(client: genai.Client, history: List[types.Content], mod_path: Path, mod_info: Dict,
+                                 memory: Dict, output_path: Path) -> Dict[str, dict]:
+    mod_cache = {}
     english_files = find_language_files(mod_path, "English")
-    if not english_files: return
+    if not english_files: return mod_cache
+
     print(f"  -> 找到 {len(english_files)} 个标准语言文件，在当前会话中处理...")
     for file_path in english_files:
         targets = load_xml_as_dict(file_path)
@@ -702,15 +727,20 @@ def process_standard_translation(client: genai.Client, history: List[types.Conte
         try:
             english_dir = next(p for p in file_path.parents if p.name == 'English')
             output_relative_path = file_path.relative_to(english_dir)
-        except StopIteration: continue
+        except StopIteration:
+            continue
         safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
         output_file_path = output_path / "Cont" / safe_mod_name / "Languages" / "ChineseSimplified" / output_relative_path
-        translate_and_save(client, history, targets, memory, output_file_path)
+
+        new_cache_entries = translate_and_save(client, history, targets, memory, output_file_path)
+        mod_cache.update(new_cache_entries)
+    return mod_cache
 
 
 def process_def_injection_translation(client: genai.Client, history: List[types.Content], mod_path: Path,
                                       mod_info: Dict, memory: Dict, output_path: Path):
     """处理Defs/和Patches/文件夹中的注入式翻译，采用最终的、兼容复杂结构的扫描逻辑。"""
+    mod_cache = {}
 
     # 1. 按“根目录 -> 版本1 -> 版本2...”的顺序获取所有待扫描文件
     files_to_scan_in_order = []
@@ -780,23 +810,21 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
             output_dir = output_path / "Cont" / safe_mod_name / "Languages" / "ChineseSimplified" / "DefInjected" / def_type
             output_file_path = output_dir / filename
             translate_and_save(client, history, targets, memory, output_file_path)
+            new_cache_entries = translate_and_save(client, history, targets, memory, output_file_path)
+            mod_cache.update(new_cache_entries)
+
+    return mod_cache
 
 
-def main(loaded_config: dict):
-    """脚本主入口，采用“每Mod一会话(通过手动历史记录)”+“JSON结构化输出”模式。"""
+def main(config: dict):
+    """脚本主入口，采用最终的“三方校对”逻辑。"""
     global CONFIG
-    CONFIG = loaded_config
-
+    CONFIG = config
     client = setup_environment()
     workshop_path = get_workshop_content_path()
-
     prev_ids = parse_ids(CONFIG['mod_ids'].get('previous', ''))
     new_ids = parse_ids(CONFIG['mod_ids']['translate'])
-
-    if not new_ids:
-        print("警告: 'translate' 列表为空，此项目没有需要处理的Mod。")
-        return
-
+    if not new_ids: print("警告: 'translate' 列表为空..."); return
     download_with_steamcmd(list(set(prev_ids + new_ids)))
 
     mod_info_map = {}
@@ -806,6 +834,11 @@ def main(loaded_config: dict):
         mod_path = mod_content_path / mod_id
         if mod_path.is_dir():
             info = get_mod_info(mod_path)
+
+            if info is None:
+                print(f"警告: 无法为Mod {mod_id} 解析元数据，将使用ID作为名称。")
+                info = {"name": mod_id, "packageId": mod_id}
+
             info = info if info else {"name": mod_id, "packageId": mod_id}
             info['id'] = mod_id
             mod_info_map[mod_id] = info
@@ -817,34 +850,45 @@ def main(loaded_config: dict):
 
     translation_memory = build_translation_memory(prev_ids, workshop_path)
 
-    print("\n--- 开始“JSON模式+模拟会话”翻译 ---")
+    print("\n--- 开始“三方校对”翻译流程 ---")
     system_prompt = get_setup_prompt()
     for mod_id, mod_info in mod_info_map.items():
-        print(f"\n>>> 正在为 Mod '{mod_info['name']}' 创建新的翻译会话历史...")
+        print(f"\n>>> 正在处理 Mod '{mod_info['name']}'...")
         mod_path = mod_content_path / mod_id
         conversation_history = [
             types.Content(role="user", parts=[types.Part.from_text(text=system_prompt)]),
             types.Content(role="model", parts=[types.Part.from_text(text="好的，我明白了...")])
         ]
-        process_standard_translation(client, conversation_history, mod_path, mod_info, translation_memory, output_path)
-        process_def_injection_translation(client, conversation_history, mod_path, mod_info, translation_memory,
-                                          output_path)
-        print(f"<<< Mod '{mod_info['name']}' 的会话处理完毕。")
+
+        # 收集当前Mod的所有新缓存条目
+        current_mod_cache = {}
+
+        cache1 = process_standard_translation(client, conversation_history, mod_path, mod_info, translation_memory,
+                                              output_path)
+        current_mod_cache.update(cache1)
+
+        cache2 = process_def_injection_translation(client, conversation_history, mod_path, mod_info, translation_memory,
+                                                   output_path)
+        current_mod_cache.update(cache2)
+
+        # --- 新增：为当前处理的Mod写入新的缓存文件 ---
+        if current_mod_cache:
+            safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
+            cache_file_path = output_path / "Cont" / safe_mod_name / "translation_cache.json"
+            cache_file_path.parent.mkdir(exist_ok=True, parents=True)
+            with cache_file_path.open('w', encoding='utf-8') as f:
+                json.dump(current_mod_cache, f, ensure_ascii=False, indent=4)
+            print(f"  -> 已为 Mod '{mod_info['name']}' 生成新的翻译缓存。")
+
+        print(f"<<< Mod '{mod_info['name']}' 处理完毕。")
 
     # --- 在所有翻译完成后，再生成元数据 ---
-    print("\n--- 本配置翻译任务完成，正在根据实际产出生成元数据 ---")
-
-    # 1. 检查Cont目录下实际生成了哪些文件夹
+    print("\n--- 所有翻译任务完成，正在根据实际产出生成最终元数据 ---")
     cont_dir = output_path / "Cont"
     final_mod_info_map = {}
     if cont_dir.is_dir():
-        # 创建一个从安全文件夹名到原始mod_info的映射
-        safe_name_to_info_map = {
-            "".join(c for c in info['name'] if c.isalnum() or c in " .-_").strip(): info
-            for info in mod_info_map.values()
-        }
-
-        # 遍历实际生成的文件夹
+        safe_name_to_info_map = {"".join(c for c in info['name'] if c.isalnum() or c in " .-_").strip(): info for info
+                                 in mod_info_map.values()}
         for subdir in cont_dir.iterdir():
             if subdir.is_dir() and subdir.name in safe_name_to_info_map:
                 original_info = safe_name_to_info_map[subdir.name]
@@ -859,8 +903,6 @@ def main(loaded_config: dict):
         create_self_translation(output_path)
 
     print(f"\n汉化包 '{CONFIG['pack_info']['name']}' 已在以下路径生成完毕: \n{output_path.resolve()}")
-    print("现在您可以将此文件夹移动到您的 RimWorld/Mods 目录进行测试，或上传到Steam创意工坊。")
-
 
 def load_config(config_path: Path | str) -> Optional[dict]:
     """加载并合并TOML配置文件。"""
