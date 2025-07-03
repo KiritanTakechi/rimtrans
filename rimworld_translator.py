@@ -436,19 +436,19 @@ def build_translation_memory(mod_ids: List[str], workshop_path: Path) -> Dict[st
 
 
 def get_setup_prompt() -> str:
-    """构建用于初始化对话历史的系统指令和术语表，并加入换行符标记规则。"""
+    """构建用于初始化对话历史的系统指令和术语表。"""
     base_system_prompt = """你是一个为游戏《环世界》(RimWorld) 设计的专业级翻译引擎。你的任务是将用户提供的JSON对象中的 `source_text` 字段翻译成简体中文，并填入 `translated_text` 字段。
 请严格遵守以下规则：
 1.  **保持键值不变**: 绝对不要修改 `key` 字段和 `source_text` 字段。
 2.  **精准翻译**: 确保翻译内容符合《环世界》的语境。
 3.  **返回完整JSON**: 你的输出必须是完整的、包含所有原始条目的JSON数组。
-4.  **处理换行符标记**: 文本中的 `[BR]` 标记是一个特殊的换行符占位符。在翻译时，必须在对应的位置原封不动地保留 `[BR]` 标记。绝对不能翻译或删除它。"""
+4.  **处理换行符标记**: 文本中的 `[BR]` 标记是一个特殊的换行符占位符。在翻译时，必须在对应的位置原封不动地保留 `[BR]` 标记。绝对不能翻译、删除或将其转换成其他形式。"""
 
     glossary_prompt_part = "5. **术语统一**: 这是最重要的规则。请严格参考以下术语表进行翻译，确保关键词的统一性：\n"
     glossary_items = [f"- '{en.lower()}': '{cn}'" for en, cn in RIMWORLD_GLOSSARY.items()]
     glossary_prompt_part += "\n".join(glossary_items)
 
-    return f"{base_system_prompt}\n\n{glossary_prompt_part}\n\n我明白了这些规则（特别是处理 `[BR]` 标记），请开始提供需要翻译的JSON内容。"
+    return f"{base_system_prompt}\n\n{glossary_prompt_part}\n\n我明白了这些规则，请开始提供需要翻译的JSON内容。"
 
 
 def convert_dict_to_json_items(data: Dict[str, str]) -> List[Dict[str, str]]:
@@ -457,9 +457,13 @@ def convert_dict_to_json_items(data: Dict[str, str]) -> List[Dict[str, str]]:
 
 
 def convert_parsed_json_to_dict(parsed_items: List[TranslationItem]) -> Dict[str, str]:
-    """将API返回的Pydantic对象列表转换为Python字典，并将[BR]标记替换回\n。"""
-    return {item.key: item.translated_text.replace('[BR]', '\n') for item in parsed_items}
-
+    """将API返回的Pydantic对象列表转换为Python字典，并将所有换行表示统一为字符串'\\n'。"""
+    final_dict = {}
+    for item in parsed_items:
+        # 关键修正：无论AI返回了[BR]还是\n，都统一为字符串"\\n"
+        normalized_text = item.translated_text.replace('[BR]', '\\n').replace('\n', '\\n')
+        final_dict[item.key] = normalized_text
+    return final_dict
 
 def translate_with_json_mode(client: genai.Client, history: List[types.Content],
                              items_to_translate: List[Dict[str, str]]) -> Optional[List[TranslationItem]]:
@@ -533,14 +537,7 @@ def translate_and_save(client: genai.Client, history: List[types.Content], targe
     for key in targets:
         if key in final_translation_dict:
             node = etree.SubElement(root, key)
-            text_content = final_translation_dict[key]
-
-            # --- 关键修正点: 使用 CDATA 包装包含换行符的文本 ---
-            if '\n' in text_content:
-                node.text = etree.CDATA(text_content)
-            else:
-                node.text = text_content
-            # --- 修正结束 ---
+            node.text = final_translation_dict[key]
 
     tree = etree.ElementTree(root)
     tree.write(str(output_file_path), encoding='utf-8', xml_declaration=True, pretty_print=True)
@@ -564,8 +561,26 @@ def process_standard_translation(client: genai.Client, history: List[types.Conte
 
 def process_def_injection_translation(client: genai.Client, history: List[types.Content], mod_path: Path,
                                       mod_info: Dict, memory: Dict, output_path: Path):
-    """处理 Defs/ 文件夹中的注入式翻译 (使用 lxml)。"""
-    def_files = list(mod_path.rglob("Defs/**/*.xml"))
+    """处理 Defs/ 文件夹中的注入式翻译，使用带优先级的查找逻辑。"""
+
+    # --- 关键修改点：带优先级的Defs文件查找 ---
+    def_files = []
+    # 优先级1: /<版本号>/Defs/
+    version_defs_path = mod_path / TARGET_RIMWORLD_VERSION / "Defs"
+    if version_defs_path.is_dir():
+        def_files = list(version_defs_path.rglob("*.xml"))
+
+    # 优先级2: /Defs/ (仅当版本目录中没有时才查找，防止重复)
+    if not def_files:
+        root_defs_path = mod_path / "Defs"
+        if root_defs_path.is_dir():
+            def_files = list(root_defs_path.rglob("*.xml"))
+
+    # 如果以上都没找到，作为备用，递归查找
+    if not def_files:
+        def_files = list(mod_path.rglob("Defs/**/*.xml"))
+    # --- 查找逻辑修改结束 ---
+
     if not def_files: return
 
     print(f"  -> 找到 {len(def_files)} 个定义(Defs)文件，在当前会话中扫描注入点...")
@@ -575,14 +590,10 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
             parser = etree.XMLParser(remove_blank_text=True)
             tree = etree.parse(str(file_path), parser)
             for element in tree.getroot():
-                # --- 修正点: 确保只处理元素节点 ---
-                if not isinstance(element.tag, str):
-                    continue
-
+                if not isinstance(element.tag, str): continue
                 def_name_node = element.find("defName")
                 if def_name_node is None or not def_name_node.text: continue
                 def_name = def_name_node.text.strip()
-
                 for sub_element in element:
                     if isinstance(sub_element.tag,
                                   str) and sub_element.tag in TRANSLATABLE_DEF_TAGS and sub_element.text:
@@ -592,7 +603,19 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
         if not targets: continue
 
         print(f"    -> 在 {file_path.name} 中发现 {len(targets)} 个可注入字段。")
-        relative_def_path = file_path.relative_to(mod_path)
+
+        try:
+            # 向上查找，找到Defs文件夹
+            defs_dir = next(p for p in file_path.parents if p.name == 'Defs')
+            # Defs文件夹的父目录就是内容根目录（比如'1.5'或mod根目录）
+            content_root = defs_dir.parent
+            # 计算文件相对于内容根目录的路径，这会得到 'Defs/...' 结构
+            relative_def_path = file_path.relative_to(content_root)
+        except StopIteration:
+            # 如果结构异常，作为备用方案，可能不准确
+            print(f"  -> 警告: 无法在 {file_path} 的路径中找到 'Defs' 文件夹，使用旧版相对路径逻辑。")
+            relative_def_path = file_path.relative_to(mod_path)
+
         safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
         output_file_path = output_path / "Cont" / safe_mod_name / "Languages" / "ChineseSimplified" / "DefInjected" / relative_def_path
 
