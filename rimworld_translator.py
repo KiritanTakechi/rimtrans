@@ -458,29 +458,28 @@ def create_self_translation(output_path: Path):
 
 
 def find_language_files(mod_path: Path, lang_folder: str) -> List[Path]:
-    """在 Mod 目录中查找指定语言的 XML 文件，按“根目录 -> 版本”顺序合并。"""
-    found_files = {}  # 使用字典去重并实现覆盖
+    """在 Mod 目录中查找指定语言的 XML 文件，修复了文件名冲突的bug。"""
+    found_files_map = {}  # 使用相对路径作为键，避免文件名冲突
 
-    # 1. 查找根目录
-    root_lang_path = mod_path / "Languages" / lang_folder
-    if root_lang_path.is_dir():
-        for f in root_lang_path.rglob("*.xml"):
-            found_files[f.name] = f
+    def scan_lang_dir(lang_dir: Path):
+        if not lang_dir.is_dir(): return
+        for f in lang_dir.rglob("*.xml"):
+            relative_path = f.relative_to(lang_dir)
+            found_files_map[relative_path] = f
 
-    # 2. 查找所有版本目录，后面的会覆盖前面的
+    # 优先级顺序: 根目录 -> 版本目录 (后面的会覆盖前面的)
+    scan_lang_dir(mod_path / "Languages" / lang_folder)
     for version in CONFIG['versions']['targets']:
-        version_lang_path = mod_path / version / "Languages" / lang_folder
-        if version_lang_path.is_dir():
-            for f in version_lang_path.rglob("*.xml"):
-                found_files[f.name] = f  # 版本化文件覆盖根文件
+        scan_lang_dir(mod_path / version / "Languages" / lang_folder)
 
-    if not found_files:
+    # 备用方案，用于结构非常不标准的Mod
+    if not found_files_map:
         for p in mod_path.glob('**/Languages'):
             lang_path = p / lang_folder
             if lang_path.is_dir():
                 return sorted(list(lang_path.rglob("*.xml")))
 
-    return sorted(list(found_files.values()))
+    return sorted(list(found_files_map.values()))
 
 
 def load_xml_as_dict(file_path: Path) -> Dict[str, str]:
@@ -499,26 +498,59 @@ def load_xml_as_dict(file_path: Path) -> Dict[str, str]:
     return translations
 
 
-def build_translation_memory(mod_ids: List[str], workshop_path: Path) -> Dict[str, str]:
-    """从旧汉化文件中构建翻译记忆库。"""
-    if not mod_ids:
+def build_translation_memory(prev_ids: List[str], workshop_path: Path) -> Dict[str, str]:
+    """从旧汉化文件中构建翻译记忆库"""
+    if not prev_ids:
         return {}
 
     print("--- 正在构建翻译记忆库 ---")
     memory = {}
     mod_content_path = workshop_path / CONFIG['system']['rimworld_app_id']
 
-    for mod_id in tqdm(mod_ids, desc="处理旧汉化"):
+    for mod_id in tqdm(prev_ids, desc="扫描旧汉化包"):
         mod_path = mod_content_path / mod_id
         if not mod_path.is_dir():
-            print(f"警告: 找不到 Mod {mod_id} 的下载目录，跳过。")
+            print(f"\n警告: 找不到 Mod {mod_id} 的下载目录，跳过。")
             continue
 
-        cn_files = find_language_files(mod_path, "ChineseSimplified")
-        for file in cn_files:
-            memory.update(load_xml_as_dict(file))
+        # --- 全新的、更全面的文件扫描逻辑 ---
+        files_to_load = []
+        # 1. 查找根目录下的Languages文件夹
+        files_to_load.extend(find_language_files(mod_path, "ChineseSimplified"))
 
-    print(f"构建完成！翻译记忆库包含 {len(memory)} 个条目。\n")
+        # 2. 查找并遍历Cont文件夹下的所有子Mod
+        cont_path = mod_path / "Cont"
+        if cont_path.is_dir():
+            for sub_mod_dir in cont_path.iterdir():
+                if sub_mod_dir.is_dir():
+                    files_to_load.extend(find_language_files(sub_mod_dir, "ChineseSimplified"))
+
+        # 使用字典去重，确保每个文件只处理一次
+        unique_files = list(dict.fromkeys(files_to_load))
+        # --- 扫描逻辑结束 ---
+
+        if not unique_files:
+            print(f"\n[记忆库] 在Mod '{mod_id}' 中未找到任何中文文件。")
+            continue
+
+        print(f"\n[记忆库] 在Mod '{mod_id}' 中找到 {len(unique_files)} 个总的中文文件，开始加载...")
+        mod_total_entries = 0
+        for file_path in unique_files:
+            new_entries = load_xml_as_dict(file_path)
+            entry_count = len(new_entries)
+            if entry_count > 0:
+                relative_display_path = file_path.relative_to(mod_path)
+                print(f"  -> 从 {relative_display_path} 加载了 {entry_count} 个条目。")
+                memory.update(new_entries)
+                mod_total_entries += entry_count
+        print(f"[记忆库] Mod '{mod_id}' 加载完毕，共计 {mod_total_entries} 个条目。")
+
+    final_count = len(memory)
+    print(f"\n构建完成！翻译记忆库包含 {final_count} 个条目。\n")
+
+    if final_count <= 1 and len(prev_ids) > 0:
+        print("!! 警告: 最终记忆库条目数可能过少。请检查上面的日志，确认是否正确找到了所有文件和条目。")
+
     return memory
 
 
@@ -607,44 +639,50 @@ def translate_with_json_mode(client: genai.Client, history: List[types.Content],
 
 def translate_and_save(client: genai.Client, history: List[types.Content], targets: Dict[str, str],
                        memory: Dict[str, str], output_file_path: Path):
-    """通用翻译和保存逻辑 (使用“标记-替换”策略)。"""
-    to_translate_dict = {k: v for k, v in targets.items() if k not in memory}
+    """通用翻译和保存逻辑，修复了当100%命中缓存时跳过写入的Bug。"""
+
+    # 1. 初始化最终字典，并直接从记忆库加载所有能找到的翻译
     final_translation_dict = {k: memory[k] for k, v in targets.items() if k in memory}
 
+    # 2. 确定哪些条目是记忆库里没有，需要联网翻译的
+    to_translate_dict = {k: v for k, v in targets.items() if k not in memory}
+
+    # 3. 如果有需要联网翻译的条目，则执行API调用
     if to_translate_dict:
-        # 预处理：将\n替换为[BR]标记
         json_items_to_translate = convert_dict_to_json_items(to_translate_dict)
 
+        # 应用慢速模式
         if CONFIG['system'].get('slow_mode', False):
-            delay = CONFIG['system'].get('slow_mode_delay', 2)
-            time.sleep(delay)
+            time.sleep(CONFIG['system'].get('slow_mode_delay', 2))
 
         parsed_result = translate_with_json_mode(client, history, json_items_to_translate)
 
+        # 处理API返回的结果
         if parsed_result:
-            # 后处理：将[BR]标记替换回\n
             translated_dict = convert_parsed_json_to_dict(parsed_result)
-
             response_for_history = TranslationResponse(translations=parsed_result)
             history.append(
                 types.Content(role="user", parts=[types.Part.from_text(text=json.dumps(json_items_to_translate))]))
             history.append(
                 types.Content(role="model", parts=[types.Part.from_text(text=response_for_history.model_dump_json())]))
 
+            # 将新翻译的条目与从记忆库加载的条目合并
             for key, original_text in to_translate_dict.items():
                 if key in translated_dict and translated_dict[key]:
                     final_translation_dict[key] = translated_dict[key]
                 else:
-                    print(f"  -> 警告: 翻译结果中缺少或为空 <{key}>，将保留英文原文。")
                     final_translation_dict[key] = f"【原文】{original_text}"
         else:
             for key, original_text in to_translate_dict.items():
                 final_translation_dict[key] = f"【API错误】{original_text}"
 
+    # 4. 只要最终字典里有内容（无论是来自记忆库还是新翻译），就执行写入
     if not final_translation_dict: return
 
     output_file_path.parent.mkdir(parents=True, exist_ok=True)
     root = etree.Element("LanguageData")
+
+    # 按照原文的顺序写入，确保文件结构不变
     for key in targets:
         if key in final_translation_dict:
             node = etree.SubElement(root, key)
@@ -794,7 +832,7 @@ def main(loaded_config: dict):
         print(f"<<< Mod '{mod_info['name']}' 的会话处理完毕。")
 
     # --- 在所有翻译完成后，再生成元数据 ---
-    print("\n--- 所有翻译任务完成，正在根据实际产出生成最终元数据 ---")
+    print("\n--- 本配置翻译任务完成，正在根据实际产出生成元数据 ---")
 
     # 1. 检查Cont目录下实际生成了哪些文件夹
     cont_dir = output_path / "Cont"
@@ -824,8 +862,12 @@ def main(loaded_config: dict):
     print("现在您可以将此文件夹移动到您的 RimWorld/Mods 目录进行测试，或上传到Steam创意工坊。")
 
 
-def load_config(config_path: str) -> dict:
+def load_config(config_path: Path | str) -> Optional[dict]:
     """加载并合并TOML配置文件。"""
+
+    if not isinstance(config_path, Path):
+        config_path = Path(config_path)
+
     print(f"--- 正在从 {config_path} 加载配置 ---")
     try:
         with open(config_path, "rb") as f:
@@ -834,6 +876,10 @@ def load_config(config_path: str) -> dict:
         print(f"错误: 配置文件不存在于路径: {config_path}"); sys.exit(1)
     except tomllib.TOMLDecodeError as e:
         print(f"错误: 配置文件格式无效: {e}"); sys.exit(1)
+
+    if not user_config.get('enabled', True):
+        print(f"配置 '{config_path.name}' 已被禁用(enabled=false)，将跳过。")
+        return None
 
     config = DEFAULT_CONFIG.copy()
     if 'system' in user_config:
@@ -893,5 +939,5 @@ if __name__ == "__main__":
         if config_data:
             main(config_data)
         else:
-            print(f"跳过项目 {config_file_path.name}，因为配置加载失败。")
+            print(f"跳过项目 {config_file_path.name}。")
         print(f"{'=' * 25} 项目 {config_file_path.name} 处理完毕 {'=' * 25}")

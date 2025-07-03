@@ -1,5 +1,7 @@
 # 这是一个RimWorld汉化包的项目配置文件示例
 
+enabled = false
+
 # [1] 汉化包本身的信息
 [pack_info]
 name = "Adaptive Storage SCN"
