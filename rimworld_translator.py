@@ -19,7 +19,7 @@ from tqdm import tqdm
 TRANSLATION_MOD_NAME: str = "Adaptive Storage SCN"
 TRANSLATION_MOD_AUTHOR: str = "Kiritan"
 TRANSLATION_MOD_DESCRIPTION: str = "这是一个自动生成的汉化包，为以下Mod提供简体中文支持：\n\n"
-TARGET_RIMWORLD_VERSION: str = "1.5" # 目标RimWorld版本
+TARGET_RIMWORLD_VERSION: str = "1.5, 1.6" # 目标RimWorld版本
 
 # 2. 上一个版本的汉化文件 (可选, 可为空)
 PREVIOUS_TRANSLATION_IDS: str = ""
@@ -299,73 +299,94 @@ def get_mod_info(mod_path: Path) -> Optional[Dict[str, str]]:
 
 
 def create_about_file(output_path: Path, mod_info_map: Dict[str, dict]):
-    """创建汉化包的About/About.xml文件。"""
+    """创建汉化包的About/About.xml文件 (lxml版本)。"""
     about_dir = output_path / "About"
-    about_dir.mkdir(exist_ok=True)
+    about_dir.mkdir(exist_ok=True, parents=True)
+
+    # 1. 创建根节点
+    root = etree.Element("ModMetaData")
+
+    # 2. 添加子节点和内容
+    etree.SubElement(root, "name").text = TRANSLATION_MOD_NAME
+    etree.SubElement(root, "author").text = TRANSLATION_MOD_AUTHOR
+
+    supported_versions_node = etree.SubElement(root, "supportedVersions")
+    etree.SubElement(supported_versions_node, "li").text = TARGET_RIMWORLD_VERSION
+
+    package_id = f"{TRANSLATION_MOD_AUTHOR.replace(' ', '')}.{TRANSLATION_MOD_NAME.replace(' ', '')}"
+    etree.SubElement(root, "packageId").text = package_id
 
     supported_mods_list = "\n".join([f"  - {info['name']}" for info in mod_info_map.values()])
     full_description = TRANSLATION_MOD_DESCRIPTION + supported_mods_list
 
-    about_content = f"""<?xml version="1.0" encoding="utf-8"?>
-<ModMetaData>
-    <name>{TRANSLATION_MOD_NAME}</name>
-    <author>{TRANSLATION_MOD_AUTHOR}</author>
-    <supportedVersions>
-        <li>{TARGET_RIMWORLD_VERSION}</li>
-    </supportedVersions>
-    <packageId>{TRANSLATION_MOD_AUTHOR.replace(" ", "")}.{TRANSLATION_MOD_NAME.replace(" ", "")}</packageId>
-    <description>{full_description}</description>
-    <modDependencies>
-"""
+    etree.SubElement(root, "description").text = full_description
+
+    # 3. 循环添加依赖项
+    dependencies_node = etree.SubElement(root, "modDependencies")
     for mod_info in mod_info_map.values():
-        about_content += f"""
-        <li>
-            <packageId>{mod_info['packageId']}</packageId>
-            <displayName>{mod_info['name']}</displayName>
-            <steamWorkshopUrl>steam://url/CommunityFilePage/{mod_info['id']}</steamWorkshopUrl>
-        </li>"""
-    about_content += """
-    </modDependencies>
-    <loadAfter>
-"""
+        li_node = etree.SubElement(dependencies_node, "li")
+        etree.SubElement(li_node, "packageId").text = mod_info['packageId']
+        etree.SubElement(li_node, "displayName").text = mod_info['name']
+        etree.SubElement(li_node, "steamWorkshopUrl").text = f"steam://url/CommunityFilePage/{mod_info['id']}"
+
+    # 4. 循环添加加载顺序
+    load_after_node = etree.SubElement(root, "loadAfter")
     for mod_info in mod_info_map.values():
-        about_content += f"""        <li>{mod_info['packageId']}</li>\n"""
-    about_content += """    </loadAfter>
-</ModMetaData>
-"""
-    (about_dir / "About.xml").write_text(about_content, encoding='utf-8')
+        etree.SubElement(load_after_node, "li").text = mod_info['packageId']
+
+    # 5. 生成并写入文件
+    tree = etree.ElementTree(root)
+    tree.write(
+        str(about_dir / "About.xml"),
+        encoding='utf-8',
+        xml_declaration=True,
+        pretty_print=True
+    )
     (about_dir / "PublishedFileId.txt").touch()
     print("生成 About/About.xml。请手动添加 Preview.png 和 ModIcon.png 到 About 文件夹。")
 
 
 def create_load_folders_file(output_path: Path, mod_info_map: Dict[str, dict]):
-    """创建LoadFolders.xml文件。"""
-    items_str = ""
-    for mod_info in mod_info_map.values():
-        # 使用Mod的真实名称作为文件夹名，移除非法字符
-        safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
-        items_str += f"        <li IfModActive=\"{mod_info['packageId']}\">Cont/{safe_mod_name}</li>\n"
+    """创建LoadFolders.xml文件 (lxml版本)。"""
+    root = etree.Element("loadFolders")
+    # 注意: XML标签不能以数字开头，所以RimWorld的惯例是在版本号前加'v'
+    version_node = etree.SubElement(root, f"v{TARGET_RIMWORLD_VERSION}")
 
-    load_folders_content = f"""<loadFolders>
-    <v{TARGET_RIMWORLD_VERSION}>
-{items_str}    </v{TARGET_RIMWORLD_VERSION}>
-</loadFolders>
-"""
-    (output_path / "LoadFolders.xml").write_text(load_folders_content, encoding='utf-8')
+    for mod_info in mod_info_map.values():
+        safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
+        li_node = etree.SubElement(version_node, "li")
+        # 使用 set() 方法添加属性
+        li_node.set("IfModActive", mod_info['packageId'])
+        li_node.text = f"Cont/{safe_mod_name}"
+
+    tree = etree.ElementTree(root)
+    tree.write(
+        str(output_path / "LoadFolders.xml"),
+        encoding='utf-8',
+        xml_declaration=True,
+        pretty_print=True
+    )
     print("生成 LoadFolders.xml。")
 
 
 def create_self_translation(output_path: Path):
-    """为汉化包自身创建简体中文翻译。"""
+    """为汉化包自身创建简体中文翻译 (lxml版本)。"""
     lang_dir = output_path / "Languages" / "ChineseSimplified" / "Keyed"
     lang_dir.mkdir(parents=True, exist_ok=True)
 
-    self_translation_content = f"""<?xml version="1.0" encoding="utf-8" ?>
-<LanguageData>
-    <{TRANSLATION_MOD_AUTHOR.replace(" ", "")}.{TRANSLATION_MOD_NAME.replace(" ", "")}.ModName>{TRANSLATION_MOD_NAME}</{TRANSLATION_MOD_AUTHOR.replace(" ", "")}.{TRANSLATION_MOD_NAME.replace(" ", "")}.ModName>
-</LanguageData>
-"""
-    (lang_dir / "SelfTranslation.xml").write_text(self_translation_content, encoding='utf-8')
+    root = etree.Element("LanguageData")
+
+    # 动态生成tag名
+    tag_name = f"{TRANSLATION_MOD_AUTHOR.replace(' ', '')}.{TRANSLATION_MOD_NAME.replace(' ', '')}.ModName"
+    etree.SubElement(root, tag_name).text = TRANSLATION_MOD_NAME
+
+    tree = etree.ElementTree(root)
+    tree.write(
+        str(lang_dir / "SelfTranslation.xml"),
+        encoding='utf-8',
+        xml_declaration=True,
+        pretty_print=True
+    )
     print("为汉化包创建自翻译文件。")
 
 
@@ -437,10 +458,10 @@ def build_translation_memory(mod_ids: List[str], workshop_path: Path) -> Dict[st
 
 def get_setup_prompt() -> str:
     """构建用于初始化对话历史的系统指令和术语表。"""
-    base_system_prompt = """你是一个为游戏《环世界》(RimWorld) 设计的专业级翻译引擎。你的任务是将用户提供的JSON对象中的 `source_text` 字段翻译成简体中文，并填入 `translated_text` 字段。
+    base_system_prompt = """你是一个为游戏《边缘世界》(RimWorld) 设计的专业级翻译引擎。你的任务是将用户提供的JSON对象中的 `source_text` 字段翻译成简体中文，并填入 `translated_text` 字段。
 请严格遵守以下规则：
 1.  **保持键值不变**: 绝对不要修改 `key` 字段和 `source_text` 字段。
-2.  **精准翻译**: 确保翻译内容符合《环世界》的语境。
+2.  **精准翻译**: 确保翻译内容符合《边缘世界》的语境。
 3.  **返回完整JSON**: 你的输出必须是完整的、包含所有原始条目的JSON数组。
 4.  **处理换行符标记**: 文本中的 `[BR]` 标记是一个特殊的换行符占位符。在翻译时，必须在对应的位置原封不动地保留 `[BR]` 标记。绝对不能翻译、删除或将其转换成其他形式。"""
 
@@ -561,65 +582,67 @@ def process_standard_translation(client: genai.Client, history: List[types.Conte
 
 def process_def_injection_translation(client: genai.Client, history: List[types.Content], mod_path: Path,
                                       mod_info: Dict, memory: Dict, output_path: Path):
-    """处理 Defs/ 文件夹中的注入式翻译，使用带优先级的查找逻辑。"""
+    """处理Defs/文件夹中的注入式翻译，采用按DefType分组的官方标准结构。"""
 
-    # --- 关键修改点：带优先级的Defs文件查找 ---
+    # 1. 优先查找并获取所有待处理的Def文件
     def_files = []
-    # 优先级1: /<版本号>/Defs/
     version_defs_path = mod_path / TARGET_RIMWORLD_VERSION / "Defs"
     if version_defs_path.is_dir():
         def_files = list(version_defs_path.rglob("*.xml"))
-
-    # 优先级2: /Defs/ (仅当版本目录中没有时才查找，防止重复)
     if not def_files:
         root_defs_path = mod_path / "Defs"
         if root_defs_path.is_dir():
             def_files = list(root_defs_path.rglob("*.xml"))
-
-    # 如果以上都没找到，作为备用，递归查找
-    if not def_files:
-        def_files = list(mod_path.rglob("Defs/**/*.xml"))
-    # --- 查找逻辑修改结束 ---
-
     if not def_files: return
 
-    print(f"  -> 找到 {len(def_files)} 个定义(Defs)文件，在当前会话中扫描注入点...")
+    print(f"  -> 找到 {len(def_files)} 个定义(Defs)文件，扫描注入点...")
+
+    # 2. 扫描所有文件，并按 {DefType: {FileName: {Key: Text}}} 的结构分组
+    all_targets_grouped = {}
     for file_path in def_files:
-        targets = {}
         try:
             parser = etree.XMLParser(remove_blank_text=True)
             tree = etree.parse(str(file_path), parser)
             for element in tree.getroot():
                 if not isinstance(element.tag, str): continue
+
+                def_type = element.tag
                 def_name_node = element.find("defName")
                 if def_name_node is None or not def_name_node.text: continue
                 def_name = def_name_node.text.strip()
+
                 for sub_element in element:
                     if isinstance(sub_element.tag,
                                   str) and sub_element.tag in TRANSLATABLE_DEF_TAGS and sub_element.text:
-                        targets[f"{def_name}.{sub_element.tag}"] = sub_element.text.strip()
+                        # 准备分组
+                        if def_type not in all_targets_grouped:
+                            all_targets_grouped[def_type] = {}
+
+                        source_filename = file_path.name
+                        if source_filename not in all_targets_grouped[def_type]:
+                            all_targets_grouped[def_type][source_filename] = {}
+
+                        injection_key = f"{def_name}.{sub_element.tag}"
+                        all_targets_grouped[def_type][source_filename][injection_key] = sub_element.text.strip()
+
         except etree.XMLSyntaxError:
             continue
-        if not targets: continue
 
-        print(f"    -> 在 {file_path.name} 中发现 {len(targets)} 个可注入字段。")
+    if not all_targets_grouped: return
 
-        try:
-            # 向上查找，找到Defs文件夹
-            defs_dir = next(p for p in file_path.parents if p.name == 'Defs')
-            # Defs文件夹的父目录就是内容根目录（比如'1.5'或mod根目录）
-            content_root = defs_dir.parent
-            # 计算文件相对于内容根目录的路径，这会得到 'Defs/...' 结构
-            relative_def_path = file_path.relative_to(content_root)
-        except StopIteration:
-            # 如果结构异常，作为备用方案，可能不准确
-            print(f"  -> 警告: 无法在 {file_path} 的路径中找到 'Defs' 文件夹，使用旧版相对路径逻辑。")
-            relative_def_path = file_path.relative_to(mod_path)
+    # 3. 遍历分组后的结果，按正确的目录结构进行翻译和保存
+    safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
 
-        safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
-        output_file_path = output_path / "Cont" / safe_mod_name / "Languages" / "ChineseSimplified" / "DefInjected" / relative_def_path
+    for def_type, files in all_targets_grouped.items():
+        print(f"    -> 发现Def类型: {def_type}")
+        for filename, targets in files.items():
+            print(f"      -> 正在处理 {filename} ({len(targets)}个条目)")
 
-        translate_and_save(client, history, targets, memory, output_file_path)
+            # 构建符合官方标准的输出路径
+            output_dir = output_path / "Cont" / safe_mod_name / "Languages" / "ChineseSimplified" / "DefInjected" / def_type
+            output_file_path = output_dir / filename
+
+            translate_and_save(client, history, targets, memory, output_file_path)
 
 
 def main():
