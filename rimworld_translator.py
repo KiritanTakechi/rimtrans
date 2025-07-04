@@ -818,111 +818,80 @@ def process_standard_translation(client: genai.Client, history: List[types.Conte
 
 
 def process_def_injection_translation(client: genai.Client, history: List[types.Content], mod_path: Path,
-                                      mod_info: Dict, memory: Dict, output_path: Path) -> Dict[str, dict]:
-    """处理Defs/和Patches/文件夹中的注入式翻译，并返回新生成的缓存条目。"""
+                                      mod_info: Dict, memory: Dict, output_path: Path, abstract_defs: Dict,
+                                      def_inheritance_map: Dict) -> Dict[str, dict]:
+    """处理注入式翻译，使用预先构建的全局知识库进行继承和材质解析。"""
     print(f"  -> 开始进行注入翻译...")
 
     mod_cache = {}
     files_to_scan = find_source_files(mod_path, ["Defs", "Patches"])
     if not files_to_scan: return mod_cache
 
-    print(f"  -> 根据Mod规则，找到 {len(files_to_scan)} 个定义(Defs/Patches)文件，开始深度扫描...")
+    print(f"  -> 找到了 {len(files_to_scan)} 个定义/补丁文件, 开始解析...")
 
-    abstract_defs, def_inheritance_map, concrete_def_elements = {}, {}, []
+    all_targets_grouped = {}
     parser = etree.XMLParser(remove_blank_text=True, recover=True)
 
-    # 阶段一: 学习
-    print("    -> 阶段1: 正在学习Mod定义和继承关系...")
     for file_path in files_to_scan:
         try:
             tree = etree.parse(str(file_path), parser)
+            # 处理文件中所有可能的定义节点
             for element in tree.xpath('//*[self::Defs or self::Patch]/*|//value/*'):
-                if not isinstance(element.tag, str): continue
-                current_name = element.get("Name") or (
-                    element.find("defName").text if element.find("defName") is not None else None)
-                parent_name = element.get("ParentName")
-                if current_name and parent_name: def_inheritance_map[current_name.strip()] = parent_name.strip()
-                if element.get("Abstract", "False").lower() == 'true' and element.get("Name"):
-                    template_name = element.get("Name")
-                    if template_name not in abstract_defs: abstract_defs[template_name] = {}
-                    for sub in element:
-                        if isinstance(sub.tag, str) and sub.tag in CONFIG['rules'][
-                            'translatable_def_tags'] and sub.text:
-                            abstract_defs[template_name][sub.tag] = sub.text.strip()
-                elif element.find("defName") is not None:
-                    concrete_def_elements.append(element)
+                if not isinstance(element.tag, str) or element.get("Abstract", "False").lower() == 'true':
+                    continue
+
+                def_name_node = element.find("defName")
+                if def_name_node is None or not def_name_node.text: continue
+                def_name = def_name_node.text.strip()
+                if any(char in def_name for char in ['{', '}', '(', ')', '/']): continue
+
+                # 递归继承
+                fields = {}
+                current_parent_name = element.get("ParentName")
+                visited_parents = set()
+                while current_parent_name and current_parent_name not in visited_parents:
+                    visited_parents.add(current_parent_name)
+                    if current_parent_name in abstract_defs:
+                        for tag, text in abstract_defs[current_parent_name].items():
+                            if tag not in fields: fields[tag] = text
+                    current_parent_name = def_inheritance_map.get(current_parent_name)
+
+                for sub in element:
+                    if isinstance(sub.tag, str) and sub.tag in CONFIG['rules']['translatable_def_tags'] and sub.text:
+                        fields[sub.tag] = sub.text.strip()
+
+                if not fields: continue
+
+                # 材质处理
+                def_type = element.tag
+                if def_type not in all_targets_grouped: all_targets_grouped[def_type] = {}
+                filename = file_path.name
+                if filename not in all_targets_grouped[def_type]: all_targets_grouped[def_type][filename] = {}
+
+                stuff_categories = element.xpath("stuffCategories/li/text()")
+                context = f"stuffable with: {', '.join(stuff_categories)}" if stuff_categories else None
+                for tag, text in fields.items():
+                    all_targets_grouped[def_type][filename][f"{def_name}.{tag}"] = {"text": text, "context": context}
         except etree.XMLSyntaxError:
             continue
 
-    print(f"    -> 学习完成，找到 {len(abstract_defs)} 个抽象模板和 {len(concrete_def_elements)} 个具体定义。")
-
-    # 阶段二: 解析
-    print("    -> 阶段2: 正在解析具体定义并处理继承与材质上下文...")
-    all_targets_grouped = {}
-    for element in concrete_def_elements:
-        def_name_node = element.find("defName")
-        if def_name_node is None or not def_name_node.text: continue
-        base_def_name = def_name_node.text.strip()
-
-        fields = {}
-        current_parent_name = element.get("ParentName")
-        visited_parents = set()
-        while current_parent_name and current_parent_name not in visited_parents:
-            visited_parents.add(current_parent_name)
-            if current_parent_name in abstract_defs:
-                for tag, text in abstract_defs[current_parent_name].items():
-                    if tag not in fields: fields[tag] = text
-            current_parent_name = def_inheritance_map.get(current_parent_name)
-        for sub in element:
-            if isinstance(sub.tag, str) and sub.tag in CONFIG['rules']['translatable_def_tags'] and sub.text:
-                fields[sub.tag] = sub.text.strip()
-
-        if not fields: continue
-
-        def_type = element.tag
-        if def_type not in all_targets_grouped: all_targets_grouped[def_type] = {}
-
-        # --- 关键修改：智能判断是否为多材质物品 ---
-        designator_dropdown = element.find("designatorDropdown")
-        stuff_categories = element.xpath("stuffCategories/li/text()")
-
-        if designator_dropdown is not None and designator_dropdown.text:
-            # 这是多材质共享一个设计器按钮的模板
-            base_label = fields.get('label', base_def_name)
-            base_desc = fields.get('description', '')
-            for category in stuff_categories:
-                if category in VANILLA_STUFFS:
-                    for stuff in VANILLA_STUFFS[category]:
-                        new_def_name = f"{designator_dropdown.text}{stuff['defName']}"
-                        # 提示AI进行拼接
-                        context = f"This is a variant of '{base_label}' made of '{stuff['defName']}'. The Chinese for the material is '{stuff['label_cn']}'."
-                        all_targets_grouped[def_type][f"{new_def_name}.label"] = {"text": base_label,
-                                                                                  "context": context}
-                        if base_desc:
-                            all_targets_grouped[def_type][f"{new_def_name}.description"] = {"text": base_desc,
-                                                                                            "context": context}
-        else:
-            # 这是普通物品或单一材质物品
-            context = f"stuffable with: {', '.join(stuff_categories)}" if stuff_categories else None
-            for tag, text in fields.items():
-                all_targets_grouped[def_type][f"{base_def_name}.{tag}"] = {"text": text, "context": context}
-
     if not all_targets_grouped: return mod_cache
 
-    # 阶段三: 翻译保存
+    # 翻译和保存
     safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
-    for def_type, targets in all_targets_grouped.items():
-        print(f"    -> 发现Def类型: {def_type}，共 {len(targets)} 个条目")
-        output_dir = output_path / "Cont" / safe_mod_name / "Languages" / "ChineseSimplified" / "DefInjected" / def_type
-        # 将所有同类型的翻译合并到一个文件，符合官方建议
-        output_file_path = output_dir / f"Generated_{def_type}_Translations.xml"
-        new_cache_entries = translate_and_save(client, history, targets, memory, output_file_path)
-        mod_cache.update(new_cache_entries)
+    for def_type, files in all_targets_grouped.items():
+        for filename, targets in files.items():
+            if not targets: continue
+            print(f"    -> 正在处理来自 {filename} 的 {len(targets)} 个 {def_type} 条目")
+            output_dir = output_path / "Cont" / safe_mod_name / "Languages" / "ChineseSimplified" / "DefInjected" / def_type
+            output_file_path = output_dir / filename
+            new_cache_entries = translate_and_save(client, history, targets, memory, output_file_path)
+            mod_cache.update(new_cache_entries)
     return mod_cache
 
 
 def main(config: dict):
-    """脚本主入口，采用最终的“三方校对”逻辑。"""
+    """脚本主入口，采用最终的“全局知识库”+“三方校对”逻辑。"""
     global CONFIG
     CONFIG = config
     client = setup_environment()
@@ -930,7 +899,9 @@ def main(config: dict):
     prev_ids = parse_ids(CONFIG['mod_ids'].get('previous', ''))
     new_ids = parse_ids(CONFIG['mod_ids']['translate'])
     if not new_ids: print("警告: 'translate' 列表为空..."); return
-    download_with_steamcmd(list(set(prev_ids + new_ids)))
+
+    all_mod_ids = list(set(prev_ids + new_ids))
+    download_with_steamcmd(all_mod_ids)
 
     mod_info_map = {}
     mod_content_path = workshop_path / CONFIG['system']['rimworld_app_id']
@@ -939,7 +910,6 @@ def main(config: dict):
         mod_path = mod_content_path / mod_id
         if mod_path.is_dir():
             info = get_mod_info(mod_path)
-
             info = info if info else {"name": mod_id, "packageId": mod_id}
             info['id'] = mod_id
             mod_info_map[mod_id] = info
@@ -949,8 +919,37 @@ def main(config: dict):
     output_path.mkdir(exist_ok=True, parents=True)
     print(f"\n汉化包将生成在: {output_path.resolve()}")
 
+    # --- 全局学习阶段 ---
+    print("\n--- 全局学习阶段: 扫描所有目标Mod以构建知识库 ---")
+    abstract_defs, def_inheritance_map = {}, {}
+    parser = etree.XMLParser(remove_blank_text=True, recover=True)
+    for mod_id in tqdm(new_ids, desc="构建全局知识库"):
+        mod_path = mod_content_path / mod_id
+        files_to_scan = find_source_files(mod_path, ["Defs", "Patches"])
+        for file_path in files_to_scan:
+            try:
+                tree = etree.parse(str(file_path), parser)
+                for element in tree.xpath('//*[self::Defs or self::Patch]/*|//value/*'):
+                    if not isinstance(element.tag, str): continue
+                    current_name = element.get("Name") or (
+                        element.find("defName").text.strip() if element.find("defName") is not None and element.find(
+                            "defName").text else None)
+                    parent_name = element.get("ParentName")
+                    if current_name and parent_name: def_inheritance_map[current_name] = parent_name.strip()
+                    if element.get("Abstract", "False").lower() == 'true' and element.get("Name"):
+                        template_name = element.get("Name")
+                        if template_name not in abstract_defs: abstract_defs[template_name] = {}
+                        for sub in element:
+                            if isinstance(sub.tag, str) and sub.tag in CONFIG['rules'][
+                                'translatable_def_tags'] and sub.text:
+                                abstract_defs[template_name][sub.tag] = sub.text.strip()
+            except etree.XMLSyntaxError:
+                continue
+    print(f"  -> 全局知识库构建完毕，包含 {len(abstract_defs)} 个抽象模板。")
+
     translation_memory = build_translation_memory(prev_ids, workshop_path)
 
+    # --- 翻译阶段 ---
     print("\n--- 开始“三方校对”翻译流程 ---")
     system_prompt = get_setup_prompt()
     for mod_id, mod_info in mod_info_map.items():
@@ -960,19 +959,15 @@ def main(config: dict):
             types.Content(role="user", parts=[types.Part.from_text(text=system_prompt)]),
             types.Content(role="model", parts=[types.Part.from_text(text="好的，我明白了...")])
         ]
-
-        # 收集当前Mod的所有新缓存条目
         current_mod_cache = {}
-
         cache1 = process_standard_translation(client, conversation_history, mod_path, mod_info, translation_memory,
                                               output_path)
         current_mod_cache.update(cache1)
-
+        # 将全局知识库传入处理函数
         cache2 = process_def_injection_translation(client, conversation_history, mod_path, mod_info, translation_memory,
-                                                   output_path)
+                                                   output_path, abstract_defs, def_inheritance_map)
         current_mod_cache.update(cache2)
 
-        # --- 为当前处理的Mod写入新的缓存文件 ---
         if current_mod_cache:
             safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
             cache_file_path = output_path / "Cont" / safe_mod_name / "translation_cache.json"
