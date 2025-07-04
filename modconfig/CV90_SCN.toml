@@ -1,6 +1,6 @@
 # 这是一个RimWorld汉化包的项目配置文件示例
 
-enabled = false
+enabled = true
 
 # [1] 汉化包本身的信息
 [pack_info]
@@ -20,7 +20,7 @@ targets = ["1.5", "1.6"]
 translate = "3017155329"
 
 # 作为翻译记忆库的旧汉化Mod ID列表 (可选)
-previous = ""
+previous = "3516070058"
 
 # [4] 翻译规则
 [rules]
