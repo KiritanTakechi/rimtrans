@@ -132,6 +132,26 @@ RIMWORLD_GLOSSARY = {
     "Zone": "区域", "pawn": "殖民者", "raid": "袭击"
 }
 
+VANILLA_STUFFS = {
+    "Woody": [
+        {"defName": "WoodLog", "label_en": "wooden", "label_cn": "木制"}
+    ],
+    "Stony": [
+        {"defName": "BlocksSandstone", "label_en": "sandstone", "label_cn": "砂岩"},
+        {"defName": "BlocksGranite", "label_en": "granite", "label_cn": "花岗岩"},
+        {"defName": "BlocksLimestone", "label_en": "limestone", "label_cn": "石灰岩"},
+        {"defName": "BlocksSlate", "label_en": "slate", "label_cn": "板岩"},
+        {"defName": "BlocksMarble", "label_en": "marble", "label_cn": "大理石"}
+    ],
+    "Metallic": [
+        {"defName": "Steel", "label_en": "steel", "label_cn": "钢铁"},
+        {"defName": "Plasteel", "label_en": "plasteel", "label_cn": "玻璃钢"},
+        {"defName": "Gold", "label_en": "gold", "label_cn": "黄金"},
+        {"defName": "Silver", "label_en": "silver", "label_cn": "白银"},
+        {"defName": "Uranium", "label_en": "uranium", "label_cn": "铀"}
+    ]
+}
+
 # --- 脚本核心代码 ---
 
 # --- Pydantic模型定义 ---
@@ -834,14 +854,15 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
         except etree.XMLSyntaxError:
             continue
 
+    print(f"    -> 学习完成，找到 {len(abstract_defs)} 个抽象模板和 {len(concrete_def_elements)} 个具体定义。")
+
     # 阶段二: 解析
     print("    -> 阶段2: 正在解析具体定义并处理继承与材质上下文...")
     all_targets_grouped = {}
     for element in concrete_def_elements:
         def_name_node = element.find("defName")
         if def_name_node is None or not def_name_node.text: continue
-        def_name = def_name_node.text.strip()
-        if any(char in def_name for char in ['{', '}', '(', ')', '/']): continue
+        base_def_name = def_name_node.text.strip()
 
         fields = {}
         current_parent_name = element.get("ParentName")
@@ -856,17 +877,37 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
             if isinstance(sub.tag, str) and sub.tag in CONFIG['rules']['translatable_def_tags'] and sub.text:
                 fields[sub.tag] = sub.text.strip()
 
-        context_str = None
-        stuff_nodes = element.xpath("stuffCategories/li/text()")
-        if stuff_nodes: context_str = f"stuffable with: {', '.join(stuff_nodes)}"
+        if not fields: continue
 
-        if fields:
-            def_type = element.tag
-            if def_type not in all_targets_grouped: all_targets_grouped[def_type] = {}
+        def_type = element.tag
+        if def_type not in all_targets_grouped: all_targets_grouped[def_type] = {}
+
+        # --- 关键修改：智能判断是否为多材质物品 ---
+        designator_dropdown = element.find("designatorDropdown")
+        stuff_categories = element.xpath("stuffCategories/li/text()")
+
+        if designator_dropdown is not None and designator_dropdown.text:
+            # 这是多材质共享一个设计器按钮的模板
+            base_label = fields.get('label', base_def_name)
+            base_desc = fields.get('description', '')
+            for category in stuff_categories:
+                if category in VANILLA_STUFFS:
+                    for stuff in VANILLA_STUFFS[category]:
+                        new_def_name = f"{designator_dropdown.text}{stuff['defName']}"
+                        # 提示AI进行拼接
+                        context = f"This is a variant of '{base_label}' made of '{stuff['defName']}'. The Chinese for the material is '{stuff['label_cn']}'."
+                        all_targets_grouped[def_type][f"{new_def_name}.label"] = {"text": base_label,
+                                                                                  "context": context}
+                        if base_desc:
+                            all_targets_grouped[def_type][f"{new_def_name}.description"] = {"text": base_desc,
+                                                                                            "context": context}
+        else:
+            # 这是普通物品或单一材质物品
+            context = f"stuffable with: {', '.join(stuff_categories)}" if stuff_categories else None
             for tag, text in fields.items():
-                all_targets_grouped[def_type][f"{def_name}.{tag}"] = {"text": text, "context": context_str}
+                all_targets_grouped[def_type][f"{base_def_name}.{tag}"] = {"text": text, "context": context}
 
-    if not all_targets_grouped: print("  -> 未在Defs/Patches中找到可翻译内容。"); return mod_cache
+    if not all_targets_grouped: return mod_cache
 
     # 阶段三: 翻译保存
     safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
