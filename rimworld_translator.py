@@ -775,7 +775,7 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
                         if not base_name_for_generation: continue
 
                         pattern = CONFIG.get('generative_rules', {}).get('prediction_pattern',
-                                                                         '{base_name}_{stuff_defName}')
+                                                                         '{base_name}{stuff_defName}')
                         for cat_name in stuff_category_names:
                             cat_name = cat_name.strip()
                             if cat_name in VANILLA_STUFFS:
