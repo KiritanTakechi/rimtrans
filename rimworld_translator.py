@@ -606,7 +606,7 @@ def get_setup_prompt() -> str:
 请严格遵守以下规则：
 1.  **保持键值不变**: 绝对不要修改 `key`、`source_text` 或 `context_info` 字段。
 2.  **精准翻译**: 确保翻译内容符合《边缘世界》的语境。
-3.  **利用上下文**: 如果提供了 `context_info` 字段，你必须参考它来生成更地道的翻译。例如，如果 `source_text` 是 "plinth"，而 `context_info` 包含 "Woody"，你应该倾向于翻译成“木制基座”或“木质底座”，而不是简单的“基座”。
+3.  **利用上下文**: 如果提供了 `context_info` 字段，你必须参考它来生成更地道的翻译。例如，如果 `source_text` 是 "Crate A"，而 `context_info` 包含 "Woody"，你应该倾向于翻译成“A型木制板条箱”或“A型木制箱子”，而不是简单的“A型板条箱”。
 4.  **返回完整JSON**: 你的输出必须是完整的、包含所有原始条目的JSON数组。
 5.  **处理换行符标记**: 文本中的 `[BR]` 标记是换行符占位符，必须在译文中原样保留。"""
     glossary_prompt_part = "6. **术语统一**: 这是最重要的规则。请严格参考以下术语表进行翻译...\n"
@@ -775,8 +775,14 @@ def process_standard_translation(client: genai.Client, history: List[types.Conte
 
     print(f"  -> 找到 {len(english_files)} 个标准语言文件...")
     for file_path in english_files:
-        targets = load_xml_as_dict(file_path)
-        if not targets: continue
+        simple_targets = load_xml_as_dict(file_path)
+        if not simple_targets: continue
+
+        nested_targets = {
+            key: {"text": text, "context": None}
+            for key, text in simple_targets.items()
+        }
+
         try:
             english_dir = next(p for p in file_path.parents if p.name == 'English')
             output_relative_path = file_path.relative_to(english_dir)
@@ -785,7 +791,7 @@ def process_standard_translation(client: genai.Client, history: List[types.Conte
         safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
         output_file_path = output_path / "Cont" / safe_mod_name / "Languages" / "ChineseSimplified" / output_relative_path
 
-        new_cache_entries = translate_and_save(client, history, targets, memory, output_file_path)
+        new_cache_entries = translate_and_save(client, history, nested_targets, memory, output_file_path)
         mod_cache.update(new_cache_entries)
 
     return mod_cache
@@ -802,12 +808,10 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
 
     print(f"  -> 根据Mod规则，找到 {len(files_to_scan)} 个定义(Defs/Patches)文件，开始深度扫描...")
 
-    abstract_defs = {}
-    def_inheritance_map = {}
-    concrete_def_elements = []
+    abstract_defs, def_inheritance_map, concrete_def_elements = {}, {}, []
     parser = etree.XMLParser(remove_blank_text=True, recover=True)
 
-    # --- 第一阶段: 学习抽象模板和继承关系 ---
+    # 阶段一: 学习
     print("    -> 阶段1: 正在学习Mod定义和继承关系...")
     for file_path in files_to_scan:
         try:
@@ -817,8 +821,7 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
                 current_name = element.get("Name") or (
                     element.find("defName").text if element.find("defName") is not None else None)
                 parent_name = element.get("ParentName")
-                if current_name and parent_name:
-                    def_inheritance_map[current_name.strip()] = parent_name.strip()
+                if current_name and parent_name: def_inheritance_map[current_name.strip()] = parent_name.strip()
                 if element.get("Abstract", "False").lower() == 'true' and element.get("Name"):
                     template_name = element.get("Name")
                     if template_name not in abstract_defs: abstract_defs[template_name] = {}
@@ -831,65 +834,49 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
         except etree.XMLSyntaxError:
             continue
 
-    print(f"    -> 学习完成，找到 {len(abstract_defs)} 个抽象模板和 {len(concrete_def_elements)} 个具体定义。")
-
-    # --- 阶段二: 遍历具体定义，递归继承并分组 ---
-    all_targets_grouped = {}
+    # 阶段二: 解析
     print("    -> 阶段2: 正在解析具体定义并处理继承与材质上下文...")
+    all_targets_grouped = {}
     for element in concrete_def_elements:
-        if element.get("Abstract", "False").lower() == 'true': continue
         def_name_node = element.find("defName")
         if def_name_node is None or not def_name_node.text: continue
         def_name = def_name_node.text.strip()
         if any(char in def_name for char in ['{', '}', '(', ')', '/']): continue
 
-        # 1. 收集字段 (包括继承)
-        fields_to_translate = {}
+        fields = {}
         current_parent_name = element.get("ParentName")
         visited_parents = set()
         while current_parent_name and current_parent_name not in visited_parents:
             visited_parents.add(current_parent_name)
             if current_parent_name in abstract_defs:
                 for tag, text in abstract_defs[current_parent_name].items():
-                    if tag not in fields_to_translate: fields_to_translate[tag] = text
+                    if tag not in fields: fields[tag] = text
             current_parent_name = def_inheritance_map.get(current_parent_name)
         for sub in element:
             if isinstance(sub.tag, str) and sub.tag in CONFIG['rules']['translatable_def_tags'] and sub.text:
-                fields_to_translate[sub.tag] = sub.text.strip()
+                fields[sub.tag] = sub.text.strip()
 
-        # 2. 收集材质上下文
         context_str = None
-        stuff_categories_nodes = element.xpath("stuffCategories/li/text()")
-        if stuff_categories_nodes:
-            context_str = f"This item is stuffable with materials from categories: {', '.join(stuff_categories_nodes)}"
+        stuff_nodes = element.xpath("stuffCategories/li/text()")
+        if stuff_nodes: context_str = f"stuffable with: {', '.join(stuff_nodes)}"
 
-        # 3. 组合最终待翻译目标
-        if fields_to_translate:
+        if fields:
             def_type = element.tag
             if def_type not in all_targets_grouped: all_targets_grouped[def_type] = {}
-            # 使用defName作为文件名的一部分，避免同名文件冲突
-            group_key = f"{def_name}_{def_type}"
-            if group_key not in all_targets_grouped[def_type]: all_targets_grouped[def_type][group_key] = {}
+            for tag, text in fields.items():
+                all_targets_grouped[def_type][f"{def_name}.{tag}"] = {"text": text, "context": context_str}
 
-            for tag, text in fields_to_translate.items():
-                injection_key = f"{def_name}.{tag}"
-                all_targets_grouped[def_type][group_key][injection_key] = {"text": text, "context": context_str}
+    if not all_targets_grouped: print("  -> 未在Defs/Patches中找到可翻译内容。"); return mod_cache
 
-    if not all_targets_grouped:
-        print("  -> 未在Defs/Patches中找到可翻译内容。")
-        return mod_cache
-
-    # 3. 翻译并保存
+    # 阶段三: 翻译保存
     safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
-    for def_type, groups in all_targets_grouped.items():
-        print(f"    -> 发现Def类型: {def_type}")
-        for group_key, targets in groups.items():
-            output_filename = f"{group_key}.xml"
-            print(f"      -> 正在处理来自 {group_key} 的 {len(targets)} 个条目")
-            output_dir = output_path / "Cont" / safe_mod_name / "Languages" / "ChineseSimplified" / "DefInjected" / def_type
-            output_file_path = output_dir / output_filename
-            new_cache_entries = translate_and_save(client, history, targets, memory, output_file_path)
-            mod_cache.update(new_cache_entries)
+    for def_type, targets in all_targets_grouped.items():
+        print(f"    -> 发现Def类型: {def_type}，共 {len(targets)} 个条目")
+        output_dir = output_path / "Cont" / safe_mod_name / "Languages" / "ChineseSimplified" / "DefInjected" / def_type
+        # 将所有同类型的翻译合并到一个文件，符合官方建议
+        output_file_path = output_dir / f"Generated_{def_type}_Translations.xml"
+        new_cache_entries = translate_and_save(client, history, targets, memory, output_file_path)
+        mod_cache.update(new_cache_entries)
     return mod_cache
 
 
