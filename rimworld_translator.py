@@ -692,9 +692,6 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
                                       def_inheritance_map: Dict, files_to_scan: List[Path]) -> Dict[str, dict]:
     """
     处理注入式翻译。
-    - 使用 '//*[defName] | //*[@Abstract="True" and @Name]' XPath，确保不会错过任何具体定义或作为模板的抽象定义。
-    - 在函数内部通过Python逻辑精准区分三种Def类型：具体物品、抽象生成器、纯抽象父类。
-    - 动态、深度地扫描所有在config中定义的可翻译标签。
     """
     print(f"  -> 开始进行注入式翻译...")
 
@@ -707,11 +704,37 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
     parser = etree.XMLParser(remove_blank_text=True, recover=True)
     translatable_tags = CONFIG['rules'].get('translatable_def_tags', [])
 
+    # 获取辅助文件根目录的配置，以识别哪些是辅助文件
+    helper_root_path_str = CONFIG.get('system', {}).get('helper_files_root')
+    helper_root_path = BASE_WORKING_DIR / helper_root_path_str if helper_root_path_str else None
+
     for file_path in files_to_scan:
         try:
             tree = etree.parse(str(file_path), parser)
+            is_helper_file = helper_root_path and file_path.is_relative_to(helper_root_path)
 
-            # 使用“或”逻辑的XPath，捕获所有具体定义和作为模板的抽象定义
+            # 如果这是一个辅助文件，使用最简单的逻辑
+            if is_helper_file:
+                print(f"    -> 正在作为辅助文件处理: {file_path.name}")
+                # 直接查找所有带defName的节点，并提取所有可翻译标签
+                for element in tree.xpath('//*[defName]'):
+                    def_name_node = element.find("defName")
+                    if def_name_node is not None and def_name_node.text:
+                        def_name = def_name_node.text.strip()
+                        def_type = element.tag
+                        filename = file_path.name
+
+                        if def_type not in all_targets_grouped: all_targets_grouped[def_type] = {}
+                        if filename not in all_targets_grouped[def_type]: all_targets_grouped[def_type][filename] = {}
+
+                        for sub in element:
+                            if isinstance(sub.tag, str) and sub.tag in translatable_tags and sub.text:
+                                key = f"{def_name}.{sub.tag}"
+                                all_targets_grouped[def_type][filename][key] = {"text": sub.text.strip(),
+                                                                                "context": f"Manual helper for {def_name}"}
+                continue  # 处理完辅助文件后，跳过后面的复杂逻辑
+
+            # --- 如果不是辅助文件，则使用我们之前完善的v8版逻辑 ---
             for element in tree.xpath('//*[defName] | //*[@Abstract="True" and @Name]'):
                 is_abstract = element.get("Abstract", "False").lower() == 'true'
 
@@ -877,7 +900,7 @@ def main(config: dict):
         mod_path = mod_content_path / mod_id
 
         # 收集Defs和Patches文件
-        files_to_scan = find_source_files(mod_path, ["Defs", "Patches"])
+        files_to_scan = find_source_files(mod_path, ["Defs", "Patches", "Scenarios"])
 
         # 添加辅助文件
         if helper_root_path and helper_root_path.is_dir():

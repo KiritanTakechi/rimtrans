@@ -30,7 +30,7 @@ previous = "3515395200"
 # 可被注入翻译的XML标签
 translatable_def_tags = [
     'label', 'description', 'jobString', 'reportString', 'verb', 'gerund',
-    'notification', 'letterLabel', 'letterText', 'statement', 'beginLetter',
+    'notification', 'letterLabel', 'letterText', 'statement', 'beginLetter', 'extraTooltip', 'deathMessage', 'labelPlural', 'pawnsPlural',
 ]
 
 # --- 新增配置区 ---
