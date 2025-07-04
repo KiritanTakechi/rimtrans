@@ -791,54 +791,100 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
     print(f"  -> 开始进行注入翻译...")
 
     mod_cache = {}
-
     files_to_scan = find_source_files(mod_path, ["Defs", "Patches"])
-
     if not files_to_scan: return mod_cache
 
-    print(f"  -> 根据Mod规则，找到 {len(files_to_scan)} 个定义(Defs/Patches)文件，开始扫描...")
+    print(f"  -> 根据Mod规则，找到 {len(files_to_scan)} 个定义(Defs/Patches)文件，开始深度扫描...")
 
-    all_targets_grouped = {}
+    all_targets_by_type = {}
+    abstract_defs_map = {}  # 新增：用于存储抽象父类定义
     parser = etree.XMLParser(remove_blank_text=True, recover=True)
 
-    def find_translatables_in_elements(elements_iterator, source_file_path, group_dict):
-        for element in elements_iterator:
-            if not isinstance(element.tag, str): continue
-            def_type, def_name_node = element.tag, element.find("defName")
-            if def_name_node is None or not def_name_node.text: continue
-            def_name = def_name_node.text.strip()
-            if any(char in def_name for char in ['{', '}', '(', ')', '/']): continue
-            for sub_element in element:
-                if isinstance(sub_element.tag, str) and sub_element.tag in CONFIG['rules'][
-                    'translatable_def_tags'] and sub_element.text:
-                    if def_type not in group_dict: group_dict[def_type] = {}
-                    source_filename = source_file_path.name
-                    if source_filename not in group_dict[def_type]: group_dict[def_type][source_filename] = {}
-                    group_dict[def_type][source_filename][f"{def_name}.{sub_element.tag}"] = sub_element.text.strip()
-
-    for file_path in dict.fromkeys(files_to_scan):
+    # --- 第一阶段: 扫描并学习所有抽象模板 ---
+    print("    -> 阶段1: 正在学习抽象定义(Abstract Defs)...")
+    for file_path in files_to_scan:
         try:
             tree = etree.parse(str(file_path), parser)
-            root = tree.getroot()
-            if root is None: continue
-            find_translatables_in_elements(root, file_path, all_targets_grouped)
-            for value_node in root.xpath('//value'):
-                if len(value_node): find_translatables_in_elements(value_node, file_path, all_targets_grouped)
+            for element in tree.xpath('//*[@Abstract="True"]'):  # 使用XPath直接找到所有抽象定义
+                if not isinstance(element.tag, str): continue
+                template_name = element.get("Name")
+                if not template_name: continue
+
+                abstract_defs_map[template_name] = {}
+                for sub_element in element:
+                    if isinstance(sub_element.tag, str) and sub_element.tag in CONFIG['rules'][
+                        'translatable_def_tags'] and sub_element.text:
+                        abstract_defs_map[template_name][sub_element.tag] = sub_element.text.strip()
         except etree.XMLSyntaxError:
             continue
 
-    if not all_targets_grouped:
+    print(f"    -> 学习完成，找到 {len(abstract_defs_map)} 个抽象模板。")
+
+    # --- 第二阶段: 扫描并关联具体定义 ---
+    print("    -> 阶段2: 正在解析具体定义并处理继承...")
+
+    def find_translatables_in_elements(elements_iterator, group_dict):
+        for element in elements_iterator:
+            if not isinstance(element.tag, str): continue
+
+            # 跳过抽象定义本身
+            if element.get("Abstract", "False").lower() == 'true': continue
+
+            def_name_node = element.find("defName")
+            if def_name_node is None or not def_name_node.text: continue
+            def_name = def_name_node.text.strip()
+            if any(char in def_name for char in ['{', '}', '(', ')', '/']): continue
+
+            def_type = element.tag
+
+            # 1. 收集自身的和继承的待翻译字段
+            fields_to_translate = {}
+            # 继承父类的字段
+            parent_name = element.get("ParentName")
+            if parent_name and parent_name in abstract_defs_map:
+                for tag, text in abstract_defs_map[parent_name].items():
+                    fields_to_translate[tag] = text
+            # 自身的字段会覆盖父类的
+            for sub_element in element:
+                if isinstance(sub_element.tag, str) and sub_element.tag in CONFIG['rules'][
+                    'translatable_def_tags'] and sub_element.text:
+                    fields_to_translate[sub_element.tag] = sub_element.text.strip()
+
+            # 2. 将最终的字段和defName组合起来
+            for tag, text in fields_to_translate.items():
+                if def_type not in group_dict: group_dict[def_type] = {}
+                # 使用defName作为文件名的一部分，避免同名文件冲突
+                group_key = f"{def_name}_{def_type}"
+                if group_key not in group_dict[def_type]: group_dict[def_type][group_key] = {}
+
+                injection_key = f"{def_name}.{tag}"
+                group_dict[def_type][group_key][injection_key] = text
+
+    for file_path in dict.fromkeys(files_to_scan):
+        try:
+            tree = etree.parse(str(file_path), parser);
+            root = tree.getroot()
+            if root is not None:
+                find_translatables_in_elements(root, all_targets_by_type)
+                for value_node in root.xpath('//value'):
+                    if len(value_node): find_translatables_in_elements(value_node, all_targets_by_type)
+        except etree.XMLSyntaxError:
+            continue
+
+    if not all_targets_by_type:
         print("  -> 未在Defs/Patches中找到可翻译内容。")
         return mod_cache
 
+    # 3. 翻译并保存
     safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
-
-    for def_type, files in all_targets_grouped.items():
+    for def_type, groups in all_targets_by_type.items():
         print(f"    -> 发现Def类型: {def_type}")
-        for filename, targets in files.items():
-            print(f"      -> 正在处理来自 {filename} 的 {len(targets)} 个条目")
+        for group_key, targets in groups.items():
+            # 使用组名作为文件名，保证唯一性
+            output_filename = f"{group_key}.xml"
+            print(f"      -> 正在处理来自 {group_key} 的 {len(targets)} 个条目")
             output_dir = output_path / "Cont" / safe_mod_name / "Languages" / "ChineseSimplified" / "DefInjected" / def_type
-            output_file_path = output_dir / filename
+            output_file_path = output_dir / output_filename
             new_cache_entries = translate_and_save(client, history, targets, memory, output_file_path)
             mod_cache.update(new_cache_entries)
 
