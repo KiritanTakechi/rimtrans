@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Defs>
+
+    <ThingDef>
+        <defName>ASNeolithicLargePotChunkSandstone</defName>
+        <label>sandstone chunk large pot</label>
+        <description>A large carved pot meant for the storage of perishable food.</description>
+    </ThingDef>
+
+    <ThingDef>
+        <defName>ASNeolithicLargePotChunkGranite</defName>
+        <label>granite chunk large pot</label>
+        <description>A large carved pot meant for the storage of perishable food.</description>
+    </ThingDef>
+
+    <ThingDef>
+        <defName>ASNeolithicLargePotChunkLimestone</defName>
+        <label>limestone chunk large pot</label>
+        <description>A large carved pot meant for the storage of perishable food.</description>
+    </ThingDef>
+
+    <ThingDef>
+        <defName>ASNeolithicLargePotChunkSlate</defName>
+        <label>slate chunk large pot</label>
+        <description>A large carved pot meant for the storage of perishable food.</description>
+    </ThingDef>
+
+    <ThingDef>
+        <defName>ASNeolithicLargePotChunkMarble</defName>
+        <label>marble chunk large pot</label>
+        <description>A large carved pot meant for the storage of perishable food.</description>
+    </ThingDef>
+
+</Defs>

@@ -18,7 +18,8 @@ from lxml import etree
 from pydantic import BaseModel, Field
 from tqdm import tqdm
 
-# --- 全局配置  ---
+# --- 默认配置 ---
+# 这些值会在配置文件缺失相应条目时被使用
 DEFAULT_CONFIG = {
     "system": {
         "steamcmd_path": "./steamcmd/steamcmd.sh",
@@ -26,65 +27,102 @@ DEFAULT_CONFIG = {
         "steam_password": "",
         "windows_steam_path": "C:/Program Files (x86)/Steam",
         "rimworld_app_id": "294100",
-        "gemini_model": "gemini-2.5-flash",
-        "slow_mode": False, # 默认关闭慢速模式
-        "slow_mode_delay": 2
+        "gemini_model": "gemini-1.2-flash-latest",
+        "slow_mode": False,
+        "slow_mode_delay": 2,
+        "helper_files_root": "ProjectHelpers",
+        "output_base_dir": "translation_output"
+    },
+    "ai_settings": {
+        "temperature": 0.2,
+        "max_retries": 5,
+        "retry_delay": 5
+    },
+    "image_generation": {
+        "background_color_hex": "#334155",
+        "text_color_hex": "#F8FAFC",
+        "subtitle_template": "简体中文汉化 by {author}"
+    },
+    "generative_rules": {
+        "prediction_pattern": "{base_name}{stuff_defName}"
     }
 }
 
-# 输出目录
+# --- 全局变量 ---
 BASE_WORKING_DIR: Path = Path(__file__).parent
-OUTPUT_PATH: Path = BASE_WORKING_DIR / "translation_output"
+CONFIG: Dict = {}  # 将由load_config填充
 
-# RimWorld 核心术语表
+# RimWorld 核心术语表 (可被配置文件覆盖)
 RIMWORLD_GLOSSARY = {
-    "Addictiveness": "成瘾性", "AI Kassandra": "AI故事叙述者", "AI Persona Core": "人工智能思维核心", "AI Storytellers": "AI故事叙述者",
-    "Advanced Weapons": "高级武器", "Agave": "龙舌兰果", "Aiming Time": "瞄准时间", "Allowed area": "许可区域", "Alpaca": "羊驼",
-    "Alpaca wool": "羊驼毛", "Alpacahide": "豚鼠皮", "Alphabeaver": "阿尔法海狸", "Animal": "动物", "Animal bed": "动物床铺",
-    "Animal sleeping box": "动物睡眠箱", "Animal sleeping spot": "动物睡眠处", "Animals": "动物", "Architect Menu": "建造",
+    "Addictiveness": "成瘾性", "AI Kassandra": "AI故事叙述者", "AI Persona Core": "人工智能思维核心",
+    "AI Storytellers": "AI故事叙述者",
+    "Advanced Weapons": "高级武器", "Agave": "龙舌兰果", "Aiming Time": "瞄准时间", "Allowed area": "许可区域",
+    "Alpaca": "羊驼",
+    "Alpaca wool": "羊驼毛", "Alpacahide": "豚鼠皮", "Alphabeaver": "阿尔法海狸", "Animal": "动物",
+    "Animal bed": "动物床铺",
+    "Animal sleeping box": "动物睡眠箱", "Animal sleeping spot": "动物睡眠处", "Animals": "动物",
+    "Architect Menu": "建造",
     "Arctic fox": "北极狐", "Arctic foxskin": "北极狐皮", "Arctic wolf": "北极狼", "Arctic wolfskin": "北极狼皮",
-    "Arid shrubland": "旱带灌木从", "Armchair": "扶手椅", "Armor": "护甲", "Armor Categories": "护甲种类", "Arms": "手臂",
-    "Artillery shell": "炮弹", "Assault Rifle": "突击步枪", "Assignment": "委派方案", "Auto-turret": "无人机枪", "Autodoor": "自动门",
-    "Backstories": "背景故事", "Base": "殖民地", "Base Healing Quality": "医疗能力", "Basics": "基础概念", "Battery": "蓄电池",
+    "Arid shrubland": "旱带灌木从", "Armchair": "扶手椅", "Armor": "护甲", "Armor Categories": "护甲种类",
+    "Arms": "手臂",
+    "Artillery shell": "炮弹", "Assault Rifle": "突击步枪", "Assignment": "委派方案", "Auto-turret": "无人机枪",
+    "Autodoor": "自动门",
+    "Backstories": "背景故事", "Base": "殖民地", "Base Healing Quality": "医疗能力", "Basics": "基础概念",
+    "Battery": "蓄电池",
     "Bearskin": "熊皮", "Beauty": "美观", "Beaverskin": "海狸皮", "Bed": "单人床", "Beer": "啤酒", "Berries": "浆果",
-    "Billiards table": "台球桌", "Bionic Arm": "仿生臂", "Bionic Eye": "仿生眼", "Bionic Leg": "仿生腿", "Birch Tree": "桦树",
-    "Blue carpet": "蓝色地毯", "Boar": "野猪", "Body Parts": "身体部位", "Boomalope": "爆炸羊", "Boomalope leather": "爆炸兽皮",
+    "Billiards table": "台球桌", "Bionic Arm": "仿生臂", "Bionic Eye": "仿生眼", "Bionic Leg": "仿生腿",
+    "Birch Tree": "桦树",
+    "Blue carpet": "蓝色地毯", "Boar": "野猪", "Body Parts": "身体部位", "Boomalope": "爆炸羊",
+    "Boomalope leather": "爆炸兽皮",
     "Boomrat": "爆炸鼠", "Brewery": "酿造台", "Brewing Speed": "酿造速度", "Bush": "灌木", "Butcher table": "屠宰台",
-    "Butchery Efficiency": "屠宰效率", "Butchery Speed": "屠宰速度", "Camelhair": "骆驼毛", "Campfire": "篝火", "Capybara": "水豚",
-    "Capybaraskin": "水豚皮", "Caribou": "驯鹿", "Carpets": "地毯", "Cassandra Classic": "「经典」卡桑德拉", "Cassowary": "鹤驼",
-    "Centipede": "机械蜈蚣", "Character Types": "生物", "Characters": "角色属性", "Charge Lance": "电荷标枪", "Chess table": "象棋桌",
-    "Chicken": "鸡", "Chinchilla": "栗鼠", "Chinchilla fur": "粟鼠皮", "Chocolate": "巧克力", "Chop Wood": "伐木", "Claim": "占有",
+    "Butchery Efficiency": "屠宰效率", "Butchery Speed": "屠宰速度", "Camelhair": "骆驼毛", "Campfire": "篝火",
+    "Capybara": "水豚",
+    "Capybaraskin": "水豚皮", "Caribou": "驯鹿", "Carpets": "地毯", "Cassandra Classic": "「经典」卡桑德拉",
+    "Cassowary": "鹤驼",
+    "Centipede": "机械蜈蚣", "Character Types": "生物", "Characters": "角色属性", "Charge Lance": "电荷标枪",
+    "Chess table": "象棋桌",
+    "Chicken": "鸡", "Chinchilla": "栗鼠", "Chinchilla fur": "粟鼠皮", "Chocolate": "巧克力", "Chop Wood": "伐木",
+    "Claim": "占有",
     "Cloth": "布", "Clothing": "衣服", "Club": "棍棒", "Cobra": "眼镜蛇", "Colonist": "殖民者", "Colonists": "殖民者",
-    "Colony": "殖民地", "Combat": "战斗", "Comfort": "舒适", "Comms console": "通讯台", "Construction Speed": "建造速度",
+    "Colony": "殖民地", "Combat": "战斗", "Comfort": "舒适", "Comms console": "通讯台",
+    "Construction Speed": "建造速度",
     "Controls": "操作控制", "Cook stove": "电动炉灶", "Cooking Speed": "烹饪速度", "Cooler": "制冷机", "Corn": "玉米",
     "Cotton Plant": "棉花（植株）", "Cougar": "美洲豹", "Cover": "掩护", "Cow": "奶牛", "Crafting spot": "加工点",
-    "Crematorium": "焚化炉", "Cryptosleep casket": "低温休眠舱", "Damage": "伤害", "Damage Types": "伤害类型", "DPS": "DPS",
+    "Crematorium": "焚化炉", "Cryptosleep casket": "低温休眠舱", "Damage": "伤害", "Damage Types": "伤害类型",
+    "DPS": "DPS",
     "Daylily": "金针莱", "Deadfall trap": "尖刺陷阱", "Debris": "碎石", "Deconstruct": "拆除", "Deer": "鹿",
     "Deterioration": "变质", "Devilstrand": "魔菇布", "Dining chair": "餐椅", "Disease": "疾病", "Door": "门",
-    "EMP Grenade": "EMP手榴弹", "Eating Speed": "进食速度", "Electric crematorium": "焚化炉", "Electric smelter": "电动熔炼机",
+    "EMP Grenade": "EMP手榴弹", "Eating Speed": "进食速度", "Electric crematorium": "焚化炉",
+    "Electric smelter": "电动熔炼机",
     "Electric smithy": "电动锻造台", "Electric tailoring bench": "电动裁缝台", "Elephant": "大象", "Emu": "鸸鹋",
-    "Environment": "环境", "Events": "特殊事件", "Fabric": "纤维", "Fabrics": "纤维", "Feet": "脚部", "Fine Meal": "精致食物",
+    "Environment": "环境", "Events": "特殊事件", "Fabric": "纤维", "Fabrics": "纤维", "Feet": "脚部",
+    "Fine Meal": "精致食物",
     "Fire": "火", "Firefighting": "灭火", "Firefoam popper": "泡沫灭火器", "Flammability": "易燃性", "Floor": "地板",
     "Food": "食物", "Food Poison Chance": "烹饪生毒几率", "Frag Grenades": "破片手榴弹", "Fueled smithy": "燃料锻造台",
-    "Furniture": "家具", "Gameplay": "游戏机制", "Gazelle": "瞪羚", "Geothermal Generator": "地热发电机", "Gladius": "短剑",
+    "Furniture": "家具", "Gameplay": "游戏机制", "Gazelle": "瞪羚", "Geothermal Generator": "地热发电机",
+    "Gladius": "短剑",
     "Glitterworld": "闪耀世界", "Glitterworld Medicine": "高级药物", "Global Learning Factor": "全局学习能力",
     "Global Work Speed": "全局工作速度", "Gold": "黄金", "Granite Blocks": "花岗岩砖块", "Grass": "草", "Grave": "坟墓",
     "Great Bow": "长弓", "Grizzly Bear": "灰熊", "Growing Zone": "种植区", "Hand-tailoring bench": "手工缝纫台",
     "Hands": "双手", "Happiness": "幸福", "Hare": "野兔", "Haul Things": "搬运", "Hauling": "搬运", "Hay": "干草",
     "Healing Speed": "医疗速度", "Healroot": "药草", "Health": "健康", "Heart": "心脏", "Heater": "加热器",
     "Heavy SMG": "重型冲锋枪", "Herbal Medicine": "草药", "Home Region": "居住区", "Home Zone": "居住区",
-    "Hop Plant": "啤酒花（植株）", "Hopper": "进料口", "Hops": "啤酒花", "Horseshoe pins": "掷马蹄铁", "Hospital bed": "病床",
+    "Hop Plant": "啤酒花（植株）", "Hopper": "进料口", "Hops": "啤酒花", "Horseshoe pins": "掷马蹄铁",
+    "Hospital bed": "病床",
     "Human": "人类", "Human leather": "人皮", "Hunt": "狩猎", "Husky": "哈士奇犬", "Hydroponics basin": "无土栽培皿",
-    "Hyperweave": "超织物", "IED trap": "自制炸弹陷阱", "Ibex": "野山羊", "Iguana": "鬣蜥", "Immunity Gain Speed": "免疫力获得速度",
-    "Improvised Turret": "简易机枪", "Incendiary Mortar": "燃烧弹迫击炮", "Inferno Cannon": "地狱火加农炮", "Injury": "伤势",
-    "Jade": "翡翠", "Joy": "娱乐", "Kidney": "肾", "Knife": "匕首", "LMG": "轻机枪", "Labrador retriever": "拉布拉多猎犬",
+    "Hyperweave": "超织物", "IED trap": "自制炸弹陷阱", "Ibex": "野山羊", "Iguana": "鬣蜥",
+    "Immunity Gain Speed": "免疫力获得速度",
+    "Improvised Turret": "简易机枪", "Incendiary Mortar": "燃烧弹迫击炮", "Inferno Cannon": "地狱火加农炮",
+    "Injury": "伤势",
+    "Jade": "翡翠", "Joy": "娱乐", "Kidney": "肾", "Knife": "匕首", "LMG": "轻机枪",
+    "Labrador retriever": "拉布拉多猎犬",
     "Large Sculpture": "大雕塑", "Lavish Meal": "奢侈食物", "Leather": "皮革", "Leathers": "皮革", "Legs": "腿部",
-
     "Limestone Blocks": "石灰岩砖块", "Liver": "肝", "Log wall": "木墙", "Long Sword": "长剑", "Lung": "肺",
     "Machining table": "机械加工台", "Marble Blocks": "大理石砖", "Market Value": "市场价值", "Material": "材质",
     "Materials": "材质", "Max Hit Points": "最大耐久度", "Meal": "熟食", "Meals": "熟食", "Meat": "肉类",
     "Mechanoid": "机械体", "Mechanoid Centipede": "机械蜈蚣", "Mechanoid Scyther": "机械螳螂", "Mechanoids": "机械体",
-    "Medical Items": "医疗用品", "Medical Operation Speed": "手术速度", "Medical Potency": "医用效果", "Medicine": "药物",
+    "Medical Items": "医疗用品", "Medical Operation Speed": "手术速度", "Medical Potency": "医用效果",
+    "Medicine": "药物",
     "Megascarab": "巨型甲虫", "Megascreen Television": "巨屏电视", "Megaspider": "巨型蜘蛛", "Megatherium": "大地懒",
     "Melee Hit Chance": "近战攻击命中率", "Mental Break Threshold": "崩溃临界值", "Metal tile": "金属地砖",
     "Milk": "鲜奶", "Mine": "采矿", "Minigun": "速射机枪", "Mining Speed": "开采速度", "Misc": "杂项",
@@ -112,7 +150,6 @@ RIMWORLD_GLOSSARY = {
     "Simple Meal": "简易食物", "Simple Prosthetic Arm": "简易假臂", "Simple Prosthetic Leg": "简易假腿",
     "Skills": "技能", "Slate Blocks": "板岩砖", "Sleeping Spot": "睡眠点", "Small Sculpture": "小雕塑",
     "Smelting Speed": "熔炼速度", "Smithing Speed": "锻造速度", "Smooth stone": "光滑石板",
-
     "Smoothing Speed": "打磨速度", "Sniper Rifle": "狙击步枪", "Snowhare": "雪兔", "Social": "社交",
     "Social Chat Impact": "社交影响", "Solar generator": "太阳能板", "Spear": "矛", "Squirrel": "松鼠",
     "Standing Lamp": "落地灯", "Steel": "钢铁", "Sterile tile": "无菌地砖", "Stockpile zone": "贮存区",
@@ -122,7 +159,6 @@ RIMWORLD_GLOSSARY = {
     "Tall Grass": "高草", "Temperature": "温度", "Textiles": "纺织品", "Thoughts": "想法", "Thrumbo": "敲击兽",
     "Tick": "刻", "Time": "时间", "Tool cabinet": "工具柜", "Torch lamp": "火把", "Torso": "躯干",
     "Tortoise": "乌龟", "Trade": "贸易", "Trade Price Improvement": "交易价格改善", "Trader": "商人",
-
     "Traits": "特性", "Trees": "树木", "Triple Rocket Launcher": "三管火箭发射器", "Tube Television": "显像管电视",
     "Tundra": "苔原", "Turkey": "火鸡", "Turret": "炮塔", "UI": "用户界面", "Uranium": "铀",
     "User interface": "用户界面", "Vent": "通风口", "Version": "版本", "Vitals monitor": "体征监测仪",
@@ -132,6 +168,7 @@ RIMWORLD_GLOSSARY = {
     "Zone": "区域", "pawn": "殖民者", "raid": "袭击", "bundle": "捆堆", "pile": "织物"
 }
 
+# 基础材质库 (可被配置文件扩展)
 VANILLA_STUFFS = {
     "Woody": [
         {"defName": "WoodLog", "label_en": "wooden", "label_cn": "木制"}
@@ -152,45 +189,35 @@ VANILLA_STUFFS = {
     ]
 }
 
-# --- 脚本核心代码 ---
 
 # --- Pydantic模型定义 ---
 class TranslationItem(BaseModel):
-    """定义单个翻译条目的数据结构"""
     key: str = Field(description="The original XML tag or injection key. This field MUST NOT be changed or translated.")
     source_text: str = Field(description="The original English text to be translated.")
-    translated_text: str = Field(description="The translated Simplified Chinese text. This is the field you need to fill.")
-    context_info: Optional[str] = Field(None,
-                                        description="Contextual information about the source text, like what kind of material it's made of (e.g., 'stuffable with Woody, Stony'). The AI should use this for more accurate translation.")
+    translated_text: str = Field(
+        description="The translated Simplified Chinese text. This is the field you need to fill.")
+    context_info: Optional[str] = Field(None, description="Contextual information for more accurate translation.")
 
 
-# --- “包装器” Pydantic 模型 ---
 class TranslationResponse(BaseModel):
-    """定义API返回的JSON对象的顶层结构，用于包装翻译条目列表。"""
     translations: List[TranslationItem] = Field(description="A list of all the translated items.")
 
 
+# --- 核心函数 ---
+
 def get_workshop_content_path() -> Path:
-    """根据操作系统自动获取 Steam Workshop 内容的基础路径。"""
     platform = sys.platform
     home = Path.home()
+    steam_path_str = CONFIG['system'].get('windows_steam_path', DEFAULT_CONFIG['system']['windows_steam_path'])
 
     if platform == "win32":
-        # Windows: 通常在 Steam 安装目录下
-        path = Path(CONFIG['system']['windows_steam_path']) / "steamapps" / "workshop" / "content"
+        path = Path(steam_path_str) / "steamapps" / "workshop" / "content"
     elif platform == "darwin":
-        # macOS
         path = home / "Library/Application Support/Steam/steamapps/workshop/content"
-    elif platform == "linux":
-        # Linux: 可能是 .steam/steam 或 .local/share/Steam
+    else:  # linux
         path1 = home / ".steam/steam/steamapps/workshop/content"
         path2 = home / ".local/share/Steam/steamapps/workshop/content"
-        if path1.exists():
-            path = path1
-        else:
-            path = path2  # 默认使用第二个常见路径
-    else:
-        raise OSError("不支持的操作系统，无法确定 Steam Workshop 路径。")
+        path = path1 if path1.exists() else path2
 
     print(f"检测到系统平台: {platform}, 将在此路径查找 Mod: {path}")
     if not path.exists():
@@ -199,7 +226,6 @@ def get_workshop_content_path() -> Path:
 
 
 def setup_environment():
-    """初始化环境，检查配置并创建所需目录。"""
     print("--- 环境设置 ---")
     api_key = os.environ.get('GEMINI_API_KEY')
     if not api_key:
@@ -221,54 +247,44 @@ def setup_environment():
         print("错误: 'CONFIG['mod_ids']['translate']' 不能为空。")
         sys.exit(1)
 
-    OUTPUT_PATH.mkdir(exist_ok=True)
-    print(f"输出目录: {OUTPUT_PATH}\n")
+    # 输出目录的创建移至main函数，因为它依赖于每个项目的配置
     return client
 
 
 def parse_ids(id_string: str) -> List[str]:
-    """将逗号分隔的 ID 字符串解析为列表。"""
-    if not id_string:
-        return []
+    if not id_string: return []
     return [item.strip() for item in id_string.split(',') if item.strip()]
 
 
 def download_with_steamcmd(mod_ids: List[str]):
-    """使用 SteamCMD 下载指定的创意工坊物品。"""
-    if not mod_ids:
-        return
-
+    if not mod_ids: return
     print(f"--- 开始使用 SteamCMD 下载 {len(mod_ids)} 个 Mod ---")
-    command = [CONFIG['system']['steamcmd_path'], "+login", CONFIG['system']['steam_user'], CONFIG['system']['steam_password']]
 
+    steamcmd_path = CONFIG['system']['steamcmd_path']
+    steam_user = CONFIG['system']['steam_user']
+    steam_password = CONFIG['system']['steam_password']
+    rimworld_app_id = CONFIG['system']['rimworld_app_id']
+
+    command = [steamcmd_path, "+login", steam_user, steam_password]
     for mod_id in mod_ids:
         print(f"准备下载 Mod ID: {mod_id}")
-        command.extend(["+workshop_download_item", CONFIG['system']['rimworld_app_id'], mod_id])
+        command.extend(["+workshop_download_item", rimworld_app_id, mod_id])
     command.append("+quit")
 
     try:
-        # 使用 Popen 以便实时读取输出
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                    encoding='utf-8')
-
-        # 简单的进度条逻辑
         with tqdm(total=len(mod_ids), desc="SteamCMD 下载中", unit="item") as pbar:
-            while True:
-                output = process.stdout.readline()
-                if output == '' and process.poll() is not None:
-                    break
-                if output:
-                    line = output.strip()
-                    if "Success. Downloaded item" in line:
-                        pbar.update(1)
-
+            for line in process.stdout:
+                if "Success. Downloaded item" in line:
+                    pbar.update(1)
+        process.wait()
         if process.returncode != 0:
             print(f"\n警告: SteamCMD 进程以非零代码 {process.returncode} 退出。")
         else:
             print("\n所有 Mod 下载任务已提交。")
-
     except FileNotFoundError:
-        print(f"错误: 无法执行 SteamCMD。路径 '{CONFIG['system']['steamcmd_path']}' 是否正确？")
+        print(f"错误: 无法执行 SteamCMD。路径 '{steamcmd_path}' 是否正确？")
         sys.exit(1)
     except Exception as e:
         print(f"SteamCMD 执行时发生未知错误: {e}")
@@ -277,136 +293,92 @@ def download_with_steamcmd(mod_ids: List[str]):
 
 
 def get_mod_info(mod_path: Path) -> Optional[Dict[str, str]]:
-    """从Mod的About.xml中提取名称和packageId。"""
     about_file = mod_path / "About" / "About.xml"
-    if not about_file.is_file():
-        return None
+    if not about_file.is_file(): return None
     try:
         tree = etree.parse(str(about_file))
-        root = tree.getroot()
-        name_node = root.find("name")
-        package_id_node = root.find("packageId")
-        author_node = root.find("author")
+        name = tree.findtext("name", default=mod_path.name).strip()
+        author = tree.findtext("author", default="UnknownAuthor").strip()
+        package_id_text = tree.findtext("packageId")
 
-        # 清理函数，只保留字母、数字和下划线
-        def sanitize_for_package_id(text: str) -> str:
+        def sanitize(text: str) -> str:
             return "".join(c for c in text if c.isalnum() or c == '_')
 
-        author = sanitize_for_package_id(author_node.text.strip()) if author_node is not None and author_node.text else "UnknownAuthor"
-        name = name_node.text.strip() if name_node is not None and name_node.text else mod_path.name
+        if package_id_text:
+            package_id = package_id_text.strip().lower()
+        else:
+            package_id = f"{sanitize(author)}.{sanitize(name)}".lower()
 
-        # 使用更安全的清理函数
-        safe_name_for_id = sanitize_for_package_id(name)
-
-        package_id = package_id_node.text.strip() if package_id_node is not None and package_id_node.text else f"{author}.{safe_name_for_id}"
-
-        return {"name": name, "packageId": package_id.lower()}
+        return {"name": name, "packageId": package_id}
     except etree.XMLSyntaxError:
         return None
 
 
 def create_placeholder_images(about_dir: Path):
-    """使用Pillow库和自带的Inter字体创建占位符图片，并动态调整字体大小以适应文本。"""
+    """根据配置创建占位符图片。"""
     print("正在生成占位符图片...")
-
-    mod_name = CONFIG['pack_info']['name']
+    img_config = CONFIG.get('image_generation', DEFAULT_CONFIG['image_generation'])
     author_name = CONFIG['pack_info']['author']
-    font_path = Path(__file__).parent / "assets" / "Inter-Regular.ttf"
+    mod_name = CONFIG['pack_info']['name']
 
-    # --- 生成 Preview.png ---
+    bg_color = img_config['background_color_hex']
+    text_color = img_config['text_color_hex']
+    subtitle_template = img_config['subtitle_template']
+    subtitle_text = subtitle_template.format(author=author_name)
+
+    font_path = BASE_WORKING_DIR / "assets" / "Inter-Regular.ttf"
+
+    def get_font(size: int, default_size: int = 20):
+        try:
+            return ImageFont.truetype(str(font_path), size) if font_path.is_file() else ImageFont.load_default(
+                size=default_size)
+        except Exception:
+            return ImageFont.load_default(size=default_size)
+
+    # --- Preview.png ---
     preview_size = (640, 360)
-    preview_bg_color = (48, 48, 64)
-    text_color = (255, 255, 255)
-
-    preview_image = Image.new('RGB', preview_size, preview_bg_color)
+    preview_image = Image.new('RGB', preview_size, bg_color)
     draw = ImageDraw.Draw(preview_image)
 
-    # --- 标题字体动态大小逻辑 ---
-    font_size = 60  # 初始最大字体大小
-    title_font = None
-    padding = 40  # 图片左右留白
-
-    while font_size > 10:  # 最小字体限制
-        try:
-            if font_path.is_file():
-                title_font = ImageFont.truetype(str(font_path), font_size)
-            else:  # 字体文件不存在，使用默认字体并跳出循环
-                title_font = ImageFont.load_default(size=30 if font_size > 20 else 15)
-                break
-        except Exception:  # 字体加载异常
-            title_font = ImageFont.load_default()
-            break
-
+    font_size = 60
+    padding = 40
+    while font_size > 10:
+        title_font = get_font(font_size, 30)
         title_bbox = draw.textbbox((0, 0), mod_name, font=title_font)
-        text_width = title_bbox[2] - title_bbox[0]
-
-        if text_width < preview_size[0] - padding:
-            # 如果宽度合适，就用这个字体大小
+        if (title_bbox[2] - title_bbox[0]) < preview_size[0] - padding:
             break
+        font_size -= 2
 
-        font_size -= 2  # 否则，缩小字体再试
-
-    # 使用最终计算好的字体大小来绘制文本
     title_bbox = draw.textbbox((0, 0), mod_name, font=title_font)
-    title_width = title_bbox[2] - title_bbox[0]
-    title_height = title_bbox[3] - title_bbox[1]
-    title_pos = ((preview_size[0] - title_width) / 2, 140 - (title_height / 2))  # 垂直居中
+    title_pos = ((preview_size[0] - (title_bbox[2] - title_bbox[0])) / 2, 140 - ((title_bbox[3] - title_bbox[1]) / 2))
     draw.text(title_pos, mod_name, fill=text_color, font=title_font)
 
-    # 绘制作者信息 (通常不需要动态大小，但依然使用try-except)
-    try:
-        if font_path.is_file():
-            subtitle_font = ImageFont.truetype(str(font_path), 30)
-        else:
-            subtitle_font = ImageFont.load_default(size=15)
-    except Exception:
-        subtitle_font = ImageFont.load_default()
-
-    subtitle_text = f"Translation by {author_name}"
+    subtitle_font = get_font(30, 15)
     subtitle_bbox = draw.textbbox((0, 0), subtitle_text, font=subtitle_font)
-    subtitle_width = subtitle_bbox[2] - subtitle_bbox[0]
-    subtitle_pos = ((preview_size[0] - subtitle_width) / 2, 220)
+    subtitle_pos = ((preview_size[0] - (subtitle_bbox[2] - subtitle_bbox[0])) / 2, 220)
     draw.text(subtitle_pos, subtitle_text, fill=(200, 200, 200), font=subtitle_font)
-
     preview_image.save(about_dir / "Preview.png")
 
-    # --- 生成 ModIcon.png ---
+    # --- ModIcon.png ---
     icon_size = (256, 256)
-    icon_image = Image.new('RGB', icon_size, preview_bg_color)
+    icon_image = Image.new('RGB', icon_size, bg_color)
     draw = ImageDraw.Draw(icon_image)
-
     icon_text = "".join([word[0] for word in mod_name.split()[:2]]).upper() or (
         mod_name[0].upper() if mod_name else "T")
-
-    try:
-        if font_path.is_file():
-            icon_font = ImageFont.truetype(str(font_path), 120)  # 图标字体可以大一些
-        else:
-            icon_font = ImageFont.load_default(size=40)
-    except Exception:
-        icon_font = ImageFont.load_default()
-
-    # 简单处理，通常图标文字不会超出
+    icon_font = get_font(120, 40)
     icon_bbox = draw.textbbox((0, 0), icon_text, font=icon_font)
-    icon_width = icon_bbox[2] - icon_bbox[0]
-    icon_height = icon_bbox[3] - icon_bbox[1]
-    # 进行轻微的垂直偏移，让文字视觉上更居中
-    icon_pos = ((icon_size[0] - icon_width) / 2, (icon_size[1] - icon_height) / 2 - (icon_font.size * 0.1))
+    icon_pos = ((icon_size[0] - (icon_bbox[2] - icon_bbox[0])) / 2,
+                (icon_size[1] - (icon_bbox[3] - icon_bbox[1])) / 2 * 0.9)
     draw.text(icon_pos, icon_text, fill=text_color, font=icon_font)
-
     icon_image.save(about_dir / "ModIcon.png")
-    print("  -> 已自动生成自适应文本大小的 Preview.png 和 ModIcon.png。")
+    print("  -> 已根据配置生成 Preview.png 和 ModIcon.png。")
 
 
 def create_about_file(output_path: Path, mod_info_map: Dict[str, dict]):
-    """创建汉化包的About/About.xml文件 (lxml版本)。"""
     about_dir = output_path / "About"
     about_dir.mkdir(exist_ok=True, parents=True)
-
-    # 1. 创建根节点
     root = etree.Element("ModMetaData")
 
-    # 2. 添加子节点和内容
     etree.SubElement(root, "name").text = CONFIG['pack_info']['name']
     etree.SubElement(root, "author").text = CONFIG['pack_info']['author']
 
@@ -418,53 +390,29 @@ def create_about_file(output_path: Path, mod_info_map: Dict[str, dict]):
     etree.SubElement(root, "packageId").text = package_id
 
     supported_mods_list = "\n".join([f"  - {info['name']}" for info in mod_info_map.values()])
-    full_description = CONFIG['pack_info']['description'] + supported_mods_list
+    etree.SubElement(root, "description").text = CONFIG['pack_info']['description'] + supported_mods_list
 
-    etree.SubElement(root, "description").text = full_description
-
-    # 3. 循环添加依赖项
-    # dependencies_node = etree.SubElement(root, "modDependencies")
-    # for mod_info in mod_info_map.values():
-    #     li_node = etree.SubElement(dependencies_node, "li")
-    #     etree.SubElement(li_node, "packageId").text = mod_info['packageId']
-    #     etree.SubElement(li_node, "displayName").text = mod_info['name']
-    #     etree.SubElement(li_node, "steamWorkshopUrl").text = f"steam://url/CommunityFilePage/{mod_info['id']}"
-
-    # 4. 循环添加加载顺序
     load_after_node = etree.SubElement(root, "loadAfter")
     for mod_info in mod_info_map.values():
         etree.SubElement(load_after_node, "li").text = mod_info['packageId']
 
-    # 5. 生成并写入文件
     tree = etree.ElementTree(root)
-    tree.write(
-        str(about_dir / "About.xml"),
-        encoding='utf-8',
-        xml_declaration=True,
-        pretty_print=True
-    )
-
+    tree.write(str(about_dir / "About.xml"), encoding='utf-8', xml_declaration=True, pretty_print=True)
     print("已生成 About/About.xml。")
 
     published_file_id_path = about_dir / "PublishedFileId.txt"
-    previous_ids_str = CONFIG['mod_ids'].get('previous', '')
-    prev_ids = parse_ids(previous_ids_str)
-
+    prev_ids = parse_ids(CONFIG['mod_ids'].get('previous', ''))
     if prev_ids:
-        main_id_to_write = prev_ids[0]
-        published_file_id_path.write_text(main_id_to_write.strip())
-        print(f"检测到 'previous' ID，已将 {main_id_to_write} 写入 PublishedFileId.txt 用于更新。")
+        published_file_id_path.write_text(prev_ids[0].strip())
+        print(f"检测到 'previous' ID，已将 {prev_ids[0]} 写入 PublishedFileId.txt 用于更新。")
     else:
         published_file_id_path.touch()
         print("未提供 'previous' ID，已创建空的 PublishedFileId.txt 用于首次上传。")
-
     create_placeholder_images(about_dir)
 
 
 def create_load_folders_file(output_path: Path, mod_info_map: Dict[str, dict]):
-    """创建LoadFolders.xml文件 (lxml版本)。"""
     root = etree.Element("loadFolders")
-
     for version in CONFIG['versions']['targets']:
         version_node = etree.SubElement(root, f"v{version}")
         for mod_info in mod_info_map.values():
@@ -472,47 +420,28 @@ def create_load_folders_file(output_path: Path, mod_info_map: Dict[str, dict]):
             li_node = etree.SubElement(version_node, "li")
             li_node.set("IfModActive", mod_info['packageId'])
             li_node.text = f"Cont/{safe_mod_name}"
-
     tree = etree.ElementTree(root)
-    tree.write(
-        str(output_path / "LoadFolders.xml"),
-        encoding='utf-8',
-        xml_declaration=True,
-        pretty_print=True
-    )
+    tree.write(str(output_path / "LoadFolders.xml"), encoding='utf-8', xml_declaration=True, pretty_print=True)
     print("生成 LoadFolders.xml。")
 
 
 def create_self_translation(output_path: Path):
-    """为汉化包自身创建简体中文翻译 (lxml版本)。"""
     lang_dir = output_path / "Languages" / "ChineseSimplified" / "Keyed"
     lang_dir.mkdir(parents=True, exist_ok=True)
-
     root = etree.Element("LanguageData")
-
-    # 动态生成tag名
     tag_name = f"{CONFIG['pack_info']['author'].replace(' ', '')}.{CONFIG['pack_info']['name'].replace(' ', '')}.ModName"
     etree.SubElement(root, tag_name).text = CONFIG['pack_info']['name']
-
     tree = etree.ElementTree(root)
-    tree.write(
-        str(lang_dir / "SelfTranslation.xml"),
-        encoding='utf-8',
-        xml_declaration=True,
-        pretty_print=True
-    )
+    tree.write(str(lang_dir / "SelfTranslation.xml"), encoding='utf-8', xml_declaration=True, pretty_print=True)
     print("为汉化包创建自翻译文件。")
 
 
 def load_xml_as_dict(file_path: Path) -> Dict[str, str]:
-    """将 RimWorld 语言 XML 文件解析为字典 (使用 lxml)。"""
     translations = {}
     try:
         parser = etree.XMLParser(remove_blank_text=True)
         tree = etree.parse(str(file_path), parser)
-        root = tree.getroot()
-        for elem in root:
-            # --- 修正点: 确保只处理元素节点，忽略注释等 ---
+        for elem in tree.getroot():
             if isinstance(elem.tag, str) and elem.text:
                 translations[elem.tag] = elem.text.strip()
     except etree.XMLSyntaxError as e:
@@ -521,107 +450,64 @@ def load_xml_as_dict(file_path: Path) -> Dict[str, str]:
 
 
 def find_source_files(mod_path: Path, target_subfolders: List[str]) -> List[Path]:
-    """
-    通用、强大的文件扫描函数，是整个脚本文件查找的核心。
-    - 理解LoadFolders.xml
-    - 处理版本覆盖
-    - 处理复杂目录结构
-    """
-    found_files_map = {}  # 使用 {相对mod根目录的路径: 绝对Path对象} 来处理覆盖
-
-    # 1. 确定要扫描的内容文件夹列表
+    found_files_map = {}
     load_folders_file = mod_path / "LoadFolders.xml"
     content_folders_in_order = []
 
-    # 优先使用LoadFolders.xml
     if load_folders_file.is_file():
         try:
             tree = etree.parse(str(load_folders_file))
-            # 按版本顺序收集，以实现覆盖
-            for version in [""] + CONFIG['versions']['targets']:  # "" 代表根目录
-                version_tag = f"v{version}" if version else "*"  # XPath处理根目录下的li
-
-                # 如果是根目录, 查找不在任何版本标签下的li
-                if not version:
-                    # 这个XPath有点复杂，但能精确找到只在<loadFolders>下一级的<li>
-                    path_strings = tree.xpath('/loadFolders/li/text()')
-                else:
-                    path_strings = tree.xpath(f'//v{version}/li/text()')
-
-                for path_str in path_strings:
-                    cleaned_path_str = path_str.strip().replace('\\', '/')
-                    if cleaned_path_str == '/':
-                        content_folders_in_order.append(mod_path)
-                    elif cleaned_path_str:
-                        content_folders_in_order.append(mod_path / cleaned_path_str)
-
-            print(f"  -> 根据 LoadFolders.xml 规则，确定扫描 {len(content_folders_in_order)} 个内容文件夹路径。")
+            versions = [""] + CONFIG['versions']['targets']
+            for version in versions:
+                xpath_query = f'/loadFolders/li/text()' if not version else f'//v{version}/li/text()'
+                for path_str in tree.xpath(xpath_query):
+                    cleaned_path = path_str.strip().replace('\\', '/')
+                    full_path = mod_path if cleaned_path == '/' else mod_path / cleaned_path
+                    if full_path not in content_folders_in_order:
+                        content_folders_in_order.append(full_path)
         except etree.XMLSyntaxError:
-            print(f"警告: LoadFolders.xml 解析失败，将回退到通用扫描模式。")
-            content_folders_in_order = []  # 清空，以便触发备用逻辑
+            content_folders_in_order = []
 
-    # 如果没有LoadFolders.xml或解析失败，使用备用扫描逻辑
     if not content_folders_in_order:
-        print("  -> 未找到或无法解析 LoadFolders.xml，启用通用扫描模式。")
-        # 根目录优先
+        print(f"  -> 未找到或无法解析LoadFolders.xml, 将在默认路径中扫描。")
         content_folders_in_order.append(mod_path)
-        # 然后是版本目录
         for version in CONFIG['versions']['targets']:
-            version_root_path = mod_path / version
-            if version_root_path.is_dir():
-                content_folders_in_order.append(version_root_path)
+            version_path = mod_path / version
+            if version_path.is_dir():
+                content_folders_in_order.append(version_path)
 
-    # 2. 遍历内容文件夹，查找目标子文件夹
-    for content_path in list(dict.fromkeys(content_folders_in_order)):
+    for content_path in content_folders_in_order:
         if not content_path.is_dir(): continue
         for target in target_subfolders:
             search_path = content_path / target
             if search_path.is_dir():
                 for f in search_path.rglob("*.xml"):
-                    # 使用相对于mod_path的路径作为key，确保全局唯一性
                     unique_key = f.relative_to(mod_path)
                     found_files_map[unique_key] = f
-
     return sorted(list(found_files_map.values()))
 
 
 def build_translation_memory(prev_ids: List[str], workshop_path: Path) -> Dict[str, dict]:
-    """从旧汉化包的translation_cache.json文件中构建三方校对记忆库。"""
-    if not prev_ids:
-        return {}
-
+    if not prev_ids: return {}
     print("--- 正在构建三方校对记忆库 ---")
     memory = {}
     mod_content_path = workshop_path / CONFIG['system']['rimworld_app_id']
-
     for mod_id in tqdm(prev_ids, desc="扫描旧汉化包"):
         mod_path = mod_content_path / mod_id
         if not mod_path.is_dir():
-            print(f"\n警告: 找不到 Mod {mod_id} 的下载目录，跳过。")
+            print(f"\n警告: 找不到Mod {mod_id}，跳过。")
             continue
-
-        cache_files = list(mod_path.rglob("translation_cache.json"))
-
-        if not cache_files:
-            print(f"\n[记忆库] 在Mod '{mod_id}' 中未找到 translation_cache.json 文件。")
-            continue
-
-        print(f"\n[记忆库] 在Mod '{mod_id}' 中找到 {len(cache_files)} 个缓存文件，开始加载...")
-        for file_path in cache_files:
+        for file_path in mod_path.rglob("translation_cache.json"):
             try:
                 with file_path.open('r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    memory.update(data)
+                    memory.update(json.load(f))
             except (json.JSONDecodeError, IOError) as e:
                 print(f"  -> 警告: 读取或解析缓存文件失败: {file_path}, 错误: {e}")
-
-    final_count = len(memory)
-    print(f"\n构建完成！翻译记忆库包含 {final_count} 个条目。\n")
+    print(f"\n构建完成！翻译记忆库包含 {len(memory)} 个条目。\n")
     return memory
 
 
 def get_setup_prompt() -> str:
-    """构建用于初始化对话历史的系统指令，增加对上下文的说明。"""
     base_system_prompt = """你是一个为游戏《边缘世界》(RimWorld) 设计的专业级翻译引擎。你的任务是将用户提供的JSON对象中的 `source_text` 字段翻译成简体中文，并填入 `translated_text` 字段。
 请严格遵守以下规则：
 1.  **保持键值不变**: 绝对不要修改 `key`、`source_text` 或 `context_info` 字段。
@@ -636,7 +522,6 @@ def get_setup_prompt() -> str:
 
 
 def convert_dict_to_json_items(data: Dict[str, dict]) -> List[Dict[str, str]]:
-    """将Python字典转换为用于JSON输入的列表，并包含上下文。"""
     items = []
     for k, v_dict in data.items():
         items.append({
@@ -647,28 +532,24 @@ def convert_dict_to_json_items(data: Dict[str, dict]) -> List[Dict[str, str]]:
         })
     return items
 
+
 def convert_parsed_json_to_dict(parsed_items: List[TranslationItem]) -> Dict[str, str]:
-    """将API返回的Pydantic对象列表转换为Python字典，并将所有换行表示统一为字符串'\\n'。"""
     final_dict = {}
     for item in parsed_items:
-        # 关键修正：无论AI返回了[BR]还是\n，都统一为字符串"\\n"
         normalized_text = item.translated_text.replace('[BR]', '\\n').replace('\n', '\\n')
         final_dict[item.key] = normalized_text
     return final_dict
 
+
 def translate_with_json_mode(client: genai.Client, history: List[types.Content],
                              items_to_translate: List[Dict[str, str]]) -> Optional[List[TranslationItem]]:
-    """
-    在模拟的会话中，使用JSON模式翻译一个批次。
-    """
-    # 将待翻译内容构建为用户的新消息
     user_prompt = f"请翻译以下JSON数组中的条目:\n{json.dumps(items_to_translate, indent=2, ensure_ascii=False)}"
-
-    # 将新消息加入历史记录
     current_contents = history + [types.Content(role="user", parts=[types.Part.from_text(text=user_prompt)])]
 
-    max_retries = 5
-    base_delay = 5  # seconds
+    ai_config = CONFIG.get('ai_settings', DEFAULT_CONFIG['ai_settings'])
+    max_retries = ai_config['max_retries']
+    base_delay = ai_config['retry_delay']
+    temperature = ai_config['temperature']
 
     for attempt in range(max_retries):
         try:
@@ -679,7 +560,7 @@ def translate_with_json_mode(client: genai.Client, history: List[types.Content],
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     response_schema=TranslationResponse,
-                    temperature=0.2
+                    temperature=temperature
                 )
             )
             if hasattr(response, 'parsed') and response.parsed is not None:
@@ -689,94 +570,73 @@ def translate_with_json_mode(client: genai.Client, history: List[types.Content],
                 return None
 
         except APIError as e:
-            # 专门处理429频率限制错误
-            if e.code == 429:  # 使用 .code 属性更准确
-                if attempt < max_retries - 1:
-                    delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
-                    print(
-                        f"\n  -> 警告: 触发API频率限制。将在 {delay:.1f} 秒后重试 (第 {attempt + 1}/{max_retries} 次)...")
-                    time.sleep(delay)
-                else:
-                    print(f"  -> 错误: 重试 {max_retries} 次后仍触发频率限制。请检查您的配额或开启慢速模式。")
-                    return None
+            if e.code == 429 and attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                print(f"\n  -> 警告: 触发API频率限制。将在 {delay:.1f} 秒后重试 (第 {attempt + 1}/{max_retries} 次)...")
+                time.sleep(delay)
             else:
-                # 其他API错误直接报告，不重试
                 print(f"在JSON模式下调用 Gemini 时发生API错误: {e}")
                 return None
         except Exception as e:
-            print(f"在JSON模式下调用 Gemini 时发生未知错误: {e}")
+            # 捕获和报告解析错误
+            print(f"在JSON模式下调用或解析Gemini响应时发生未知错误: {e}")
             return None
-    return None  # 所有重试失败后返回
+
+    print(f"  -> 错误: 重试 {max_retries} 次后仍失败。")
+    return None
 
 
 def translate_and_save(client: genai.Client, history: List[types.Content], targets: Dict[str, dict],
                        memory: Dict[str, dict], output_file_path: Path) -> Dict[str, dict]:
-    """通用翻译和保存逻辑，实现四向校对并返回新缓存。"""
-    ERROR_PREFIX = "【API错误】"
-    ORIGINAL_PREFIX = "【原文】"
+    ERROR_PREFIX, ORIGINAL_PREFIX = "【API错误】", "【原文】"
     to_translate_dict, final_translation_dict, new_cache_data = {}, {}, {}
 
     for key, new_data in targets.items():
         new_en_text = new_data['text']
         new_context = new_data.get('context')
-
         if key in memory:
             old_data = memory[key]
-            old_en_text = old_data.get('en', '')
-            old_cn_text = old_data.get('cn', '')
-            old_context = old_data.get('context')
-
-            is_en_text_same = (new_en_text == old_en_text)
-            is_context_same = (new_context == old_context)
-            is_cn_text_valid = not (isinstance(old_cn_text, str) and (
-                        old_cn_text.startswith(ERROR_PREFIX) or old_cn_text.startswith(ORIGINAL_PREFIX)))
-
+            is_en_text_same = new_en_text == old_data.get('en', '')
+            is_context_same = new_context == old_data.get('context')
+            is_cn_text_valid = not (isinstance(old_data.get('cn'), str) and (
+                        old_data['cn'].startswith(ERROR_PREFIX) or old_data['cn'].startswith(ORIGINAL_PREFIX)))
             if is_en_text_same and is_context_same and is_cn_text_valid:
-                final_translation_dict[key] = old_cn_text
-                new_cache_data[key] = {'en': new_en_text, 'cn': old_cn_text, 'context': new_context}
-            else:
-                to_translate_dict[key] = new_data
-        else:
-            to_translate_dict[key] = new_data
+                final_translation_dict[key] = old_data['cn']
+                new_cache_data[key] = {'en': new_en_text, 'cn': old_data['cn'], 'context': new_context}
+                continue
+        to_translate_dict[key] = new_data
 
     if to_translate_dict:
-        json_items_to_translate = convert_dict_to_json_items(to_translate_dict)
         if CONFIG['system'].get('slow_mode', False): time.sleep(CONFIG['system'].get('slow_mode_delay', 2))
-
+        json_items_to_translate = convert_dict_to_json_items(to_translate_dict)
         parsed_result = translate_with_json_mode(client, history, json_items_to_translate)
+
         if parsed_result:
             translated_dict = convert_parsed_json_to_dict(parsed_result)
             response_for_history = TranslationResponse(translations=parsed_result)
-            history.append(
-                types.Content(role="user", parts=[types.Part.from_text(text=json.dumps(json_items_to_translate))]))
-            history.append(
-                types.Content(role="model", parts=[types.Part.from_text(text=response_for_history.model_dump_json())]))
+            history.append(types.Content(role="user", parts=[
+                types.Part.from_text(text=json.dumps(json_items_to_translate, ensure_ascii=False))]))
+            history.append(types.Content(role="model", parts=[
+                types.Part.from_text(text=response_for_history.model_dump_json(indent=2))]))
 
             for key, original_data in to_translate_dict.items():
-                original_text = original_data['text']
-                context = original_data.get('context')
-                translated_text = translated_dict.get(key)
-                if translated_text:
-                    final_translation_dict[key] = translated_text
-                    new_cache_data[key] = {'en': original_text, 'cn': translated_text, 'context': context}
-                else:
-                    final_translation_dict[key] = f"{ORIGINAL_PREFIX}{original_text}"
-                    new_cache_data[key] = {'en': original_text, 'cn': f"{ORIGINAL_PREFIX}{original_text}",
-                                           'context': context}
-        else:
+                translated_text = translated_dict.get(key, f"{ORIGINAL_PREFIX}{original_data['text']}")
+                final_translation_dict[key] = translated_text
+                new_cache_data[key] = {'en': original_data['text'], 'cn': translated_text,
+                                       'context': original_data.get('context')}
+        else:  # API call or parsing failed
             for key, original_data in to_translate_dict.items():
-                original_text = original_data['text']
-                context = original_data.get('context')
-                final_translation_dict[key] = f"{ERROR_PREFIX}{original_text}"
-                new_cache_data[key] = {'en': original_text, 'cn': f"{ERROR_PREFIX}{original_text}", 'context': context}
+                error_text = f"{ERROR_PREFIX}{original_data['text']}"
+                final_translation_dict[key] = error_text
+                new_cache_data[key] = {'en': original_data['text'], 'cn': error_text,
+                                       'context': original_data.get('context')}
 
     if not final_translation_dict: return {}
 
     output_file_path.parent.mkdir(parents=True, exist_ok=True)
     root = etree.Element("LanguageData")
     for key, value in sorted(final_translation_dict.items()):
-        node = etree.SubElement(root, key)
-        node.text = value
+        etree.SubElement(root, key).text = value
     tree = etree.ElementTree(root)
     tree.write(str(output_file_path), encoding='utf-8', xml_declaration=True, pretty_print=True)
     return new_cache_data
@@ -784,135 +644,116 @@ def translate_and_save(client: genai.Client, history: List[types.Content], targe
 
 def process_standard_translation(client: genai.Client, history: List[types.Content], mod_path: Path, mod_info: Dict,
                                  memory: Dict, output_path: Path) -> Dict[str, dict]:
-    """处理 Languages/English 文件夹中的标准翻译，并返回新生成的缓存条目。"""
-    print(f"  -> 开始进行接口翻译...")
-
+    print(f"  -> 开始进行标准接口翻译...")
     mod_cache = {}
     english_files = find_source_files(mod_path, ["Languages/English"])
-
-    if not english_files:
-        return mod_cache
+    if not english_files: return mod_cache
 
     print(f"  -> 找到 {len(english_files)} 个标准语言文件...")
     for file_path in english_files:
         simple_targets = load_xml_as_dict(file_path)
         if not simple_targets: continue
-
-        nested_targets = {
-            key: {"text": text, "context": None}
-            for key, text in simple_targets.items()
-        }
+        nested_targets = {key: {"text": text, "context": None} for key, text in simple_targets.items()}
 
         try:
-            english_dir = next(p for p in file_path.parents if p.name == 'English')
-            output_relative_path = file_path.relative_to(english_dir)
+            output_relative_path = file_path.relative_to(next(p for p in file_path.parents if p.name == 'English'))
         except StopIteration:
             continue
+
         safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
-        output_file_path = output_path / "Cont" / safe_mod_name / "Languages" / "ChineseSimplified" / output_relative_path
+        output_file = output_path / "Cont" / safe_mod_name / "Languages" / "ChineseSimplified" / output_relative_path
 
-        new_cache_entries = translate_and_save(client, history, nested_targets, memory, output_file_path)
+        new_cache_entries = translate_and_save(client, history, nested_targets, memory, output_file)
         mod_cache.update(new_cache_entries)
-
     return mod_cache
 
 
-def process_def_injection_translation(client: genai.Client, history: List[types.Content], mod_path: Path,
-                                      mod_info: Dict, memory: Dict, output_path: Path, abstract_defs: Dict,
-                                      def_inheritance_map: Dict) -> Dict[str, dict]:
+def process_def_injection_translation(client: genai.Client, history: List[types.Content],
+                                      files_to_process: List[Path],  # <--- 修改点：不再接收mod_path，而是直接接收文件列表
+                                      mod_info: Dict, memory: Dict, output_path: Path,
+                                      abstract_defs: Dict, def_inheritance_map: Dict) -> Dict[str, dict]:
     """
-    处理注入式翻译（最终修正版 v3）。
-    - 严格区分三种ThingDef类型：具体物品、抽象生成器、纯抽象父类。
-    - 仅为“具体物品”和“抽象生成器生成的物品”创建翻译条目。
-    - 忽略纯粹用于继承的抽象父类，避免生成不必要的翻译。
+    处理注入式翻译（v5 - 已修复文件列表传递错误）。
+    - 直接使用main函数传递的、包含辅助文件的完整列表进行处理。
     """
-    print(f"  -> 开始进行注入翻译 (使用最终修正逻辑 v3)...")
+    print(f"  -> 开始进行注入式翻译 (v5 - 使用主文件列表)...")
 
-    mod_cache = {}
-    files_to_scan = find_source_files(mod_path, ["Defs", "Patches"])
-    if not files_to_scan: return mod_cache
+    # 【核心修正】删除函数内部自己的文件查找逻辑，直接使用传入的列表
+    if not files_to_process:
+        print("  -> 没有需要进行注入式翻译的文件。")
+        return {}
 
-    print(f"  -> 找到了 {len(files_to_scan)} 个定义/补丁文件, 开始解析...")
-
+    print(f"  -> 正在处理 {len(files_to_process)} 个定义/补丁/辅助文件...")
     all_targets_grouped = {}
     parser = etree.XMLParser(remove_blank_text=True, recover=True)
 
-    for file_path in files_to_scan:
+    # 直接遍历传入的文件列表
+    for file_path in files_to_process:
         try:
             tree = etree.parse(str(file_path), parser)
             for element in tree.xpath('//ThingDef'):
 
-                # --- 1. 继承逻辑：首先，为当前元素构建完整的字段信息 ---
                 fields = {}
-                # 优先使用元素自身的字段
                 for sub in element:
                     if isinstance(sub.tag, str) and sub.tag in CONFIG['rules']['translatable_def_tags'] and sub.text:
                         fields[sub.tag] = sub.text.strip()
 
-                # 向上递归查找父类来填充缺失的字段
                 current_parent_name = element.get("ParentName")
                 visited_parents = set()
                 while current_parent_name and current_parent_name not in visited_parents:
                     visited_parents.add(current_parent_name)
                     if current_parent_name in abstract_defs:
                         for tag, text in abstract_defs[current_parent_name].items():
-                            if tag not in fields:
-                                fields[tag] = text
+                            if tag not in fields: fields[tag] = text
                     current_parent_name = def_inheritance_map.get(current_parent_name)
 
                 if not fields: continue
 
-                # --- 2. 核心分类与处理逻辑 ---
                 is_abstract = element.get("Abstract", "False").lower() == 'true'
                 stuff_category_names = element.xpath("stuffCategories/li/text()")
-
                 def_type = element.tag
                 filename = file_path.name
+
                 if def_type not in all_targets_grouped: all_targets_grouped[def_type] = {}
                 if filename not in all_targets_grouped[def_type]: all_targets_grouped[def_type][filename] = {}
 
-                # --- 路径A：具体物品 (Concrete ThingDef) ---
-                # 无论是可填充材质的还是不可的，只要不是抽象的，就直接翻译它的defName。
                 if not is_abstract:
                     def_name_node = element.find("defName")
                     if def_name_node is not None and def_name_node.text:
                         base_name = def_name_node.text.strip()
-                        context = None
+                        context = "A standard buildable item."
                         if stuff_category_names:
                             context = f"This is a blueprint for an item that can be made from various materials in categories like {', '.join(stuff_category_names)}. Provide a generic translation for the base item."
-
                         for tag, text in fields.items():
                             key = f"{base_name}.{tag}"
                             all_targets_grouped[def_type][filename][key] = {"text": text, "context": context}
-
-                # --- 路径B：抽象生成器 (Abstract Generator) ---
-                # 必须是抽象的，且有材质类别。
                 elif is_abstract and stuff_category_names:
                     base_name_for_generation = element.get("Name")
                     if not base_name_for_generation: continue
+
+                    pattern = CONFIG.get('generative_rules', {}).get('prediction_pattern',
+                                                                     '{base_name}_{stuff_defName}')
 
                     for cat_name in stuff_category_names:
                         cat_name = cat_name.strip()
                         if cat_name in VANILLA_STUFFS:
                             for stuff in VANILLA_STUFFS[cat_name]:
-                                generated_def_name = f"{base_name_for_generation}_{stuff['defName']}"
-                                context = f"An item generated from the abstract base '{base_name_for_generation}', made from material '{stuff['label_en']}'. The Chinese name for the material is '{stuff['label_cn']}'. Please provide a specific translation."
+                                generated_def_name = pattern.format(base_name=base_name_for_generation,
+                                                                    stuff_defName=stuff['defName'])
+                                context = f"An item generated from the abstract base '{base_name_for_generation}', made from material '{stuff['label_en']}'. The Chinese name for the material is '{stuff['label_cn']}'."
                                 for tag, text in fields.items():
                                     key = f"{generated_def_name}.{tag}"
                                     all_targets_grouped[def_type][filename][key] = {"text": text, "context": context}
-
-                # --- 路径C：纯抽象父类 (Pure Abstract Parent) ---
-                # is_abstract为True，但没有stuffCategories。这些将被自然忽略，不执行任何操作。
-
-        except etree.XMLSyntaxError:
+        except etree.XMLSyntaxError as e:
+            print(f"  -> 警告: 解析文件失败 {file_path.name}, 错误: {e}")
             continue
 
     if not all_targets_grouped:
         print("  -> 未找到可供注入翻译的条目。")
-        return mod_cache
+        return {}
 
-    # --- 后续的翻译和保存逻辑保持不变 ---
     safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
+    mod_cache = {}
     for def_type, files in all_targets_grouped.items():
         for filename, targets in files.items():
             if not targets: continue
@@ -921,19 +762,38 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
             output_file_path = output_dir / filename
             new_cache_entries = translate_and_save(client, history, targets, memory, output_file_path)
             mod_cache.update(new_cache_entries)
-
     return mod_cache
 
 
 def main(config: dict):
-    """脚本主入口，采用最终的“全局知识库”+“三方校对”逻辑。"""
     global CONFIG
     CONFIG = config
+
+    # --- 应用自定义配置 ---
+    custom_glossary = CONFIG.get('custom_glossary', {})
+    if custom_glossary:
+        RIMWORLD_GLOSSARY.update(custom_glossary)
+        print(f"自定义术语表已加载，共更新/添加 {len(custom_glossary)} 个术语。")
+
+    custom_stuff_list = CONFIG.get('generative_rules', {}).get('custom_stuff', [])
+    if custom_stuff_list:
+        count = 0
+        for stuff in custom_stuff_list:
+            category = stuff.get('category')
+            if category:
+                if category not in VANILLA_STUFFS: VANILLA_STUFFS[category] = []
+                VANILLA_STUFFS[category].append(stuff)
+                count += 1
+        print(f"自定义材质库已加载，共添加 {count} 种新材质。")
+
+    # --- 正常流程 ---
     client = setup_environment()
     workshop_path = get_workshop_content_path()
     prev_ids = parse_ids(CONFIG['mod_ids'].get('previous', ''))
     new_ids = parse_ids(CONFIG['mod_ids']['translate'])
-    if not new_ids: print("警告: 'translate' 列表为空..."); return
+    if not new_ids:
+        print("警告: 'translate' 列表为空，无可翻译的Mod。")
+        return
 
     all_mod_ids = list(set(prev_ids + new_ids))
     download_with_steamcmd(all_mod_ids)
@@ -945,12 +805,13 @@ def main(config: dict):
         mod_path = mod_content_path / mod_id
         if mod_path.is_dir():
             info = get_mod_info(mod_path)
-            info = info if info else {"name": mod_id, "packageId": mod_id}
+            if not info: info = {"name": mod_id, "packageId": mod_id}
             info['id'] = mod_id
             mod_info_map[mod_id] = info
             print(f"  > 找到Mod: {info['name']} (packageId: {info['packageId']})")
 
-    output_path = OUTPUT_PATH / CONFIG['pack_info']['name'].replace(" ", "_")
+    output_base_dir = CONFIG.get('system', {}).get('output_base_dir', 'translation_output')
+    output_path = BASE_WORKING_DIR / output_base_dir / CONFIG['pack_info']['name'].replace(" ", "_")
     output_path.mkdir(exist_ok=True, parents=True)
     print(f"\n汉化包将生成在: {output_path.resolve()}")
 
@@ -958,19 +819,36 @@ def main(config: dict):
     print("\n--- 全局学习阶段: 扫描所有目标Mod以构建知识库 ---")
     abstract_defs, def_inheritance_map = {}, {}
     parser = etree.XMLParser(remove_blank_text=True, recover=True)
+
+    # 获取辅助文件根目录的配置
+    helper_root_path_str = CONFIG.get('system', {}).get('helper_files_root')
+    helper_root_path = BASE_WORKING_DIR / helper_root_path_str if helper_root_path_str else None
+
     for mod_id in tqdm(new_ids, desc="构建全局知识库"):
         mod_path = mod_content_path / mod_id
+
+        # 【核心修改】在这里组合来自Mod下载目录和项目辅助目录的文件列表
         files_to_scan = find_source_files(mod_path, ["Defs", "Patches"])
+
+        if helper_root_path and helper_root_path.is_dir():
+            mod_helper_path = helper_root_path / mod_id
+            if mod_helper_path.is_dir():
+                helper_files = list(mod_helper_path.rglob("*.xml"))
+                if helper_files:
+                    print(f"\n  -> 为Mod {mod_id} 找到 {len(helper_files)} 个辅助文件。")
+                    files_to_scan.extend(helper_files)
+
         for file_path in files_to_scan:
             try:
                 tree = etree.parse(str(file_path), parser)
                 for element in tree.xpath('//*[self::Defs or self::Patch]/*|//value/*'):
                     if not isinstance(element.tag, str): continue
-                    current_name = element.get("Name") or (
-                        element.find("defName").text.strip() if element.find("defName") is not None and element.find(
-                            "defName").text else None)
+                    current_name_node = element.find("defName")
+                    current_name = current_name_node.text.strip() if current_name_node is not None and current_name_node.text else element.get(
+                        "Name")
                     parent_name = element.get("ParentName")
-                    if current_name and parent_name: def_inheritance_map[current_name] = parent_name.strip()
+                    if current_name and parent_name:
+                        def_inheritance_map[current_name] = parent_name.strip()
                     if element.get("Abstract", "False").lower() == 'true' and element.get("Name"):
                         template_name = element.get("Name")
                         if template_name not in abstract_defs: abstract_defs[template_name] = {}
@@ -988,17 +866,18 @@ def main(config: dict):
     print("\n--- 开始“三方校对”翻译流程 ---")
     system_prompt = get_setup_prompt()
     for mod_id, mod_info in mod_info_map.items():
-        print(f"\n>>> 正在处理 Mod '{mod_info['name']}'...")
+        print(f"\n>>> 正在处理 Mod '{mod_info['name']}' ({mod_id})...")
         mod_path = mod_content_path / mod_id
         conversation_history = [
             types.Content(role="user", parts=[types.Part.from_text(text=system_prompt)]),
-            types.Content(role="model", parts=[types.Part.from_text(text="好的，我明白了...")])
+            types.Content(role="model", parts=[types.Part.from_text(text="好的，我明白了，请提供需要翻译的内容。")])
         ]
         current_mod_cache = {}
         cache1 = process_standard_translation(client, conversation_history, mod_path, mod_info, translation_memory,
                                               output_path)
         current_mod_cache.update(cache1)
-        # 将全局知识库传入处理函数
+
+        # 注意：这里的 process_def_injection_translation 函数现在会处理来自辅助文件的内容了
         cache2 = process_def_injection_translation(client, conversation_history, mod_path, mod_info, translation_memory,
                                                    output_path, abstract_defs, def_inheritance_map)
         current_mod_cache.update(cache2)
@@ -1010,20 +889,14 @@ def main(config: dict):
             with cache_file_path.open('w', encoding='utf-8') as f:
                 json.dump(current_mod_cache, f, ensure_ascii=False, indent=4)
             print(f"  -> 已为 Mod '{mod_info['name']}' 生成新的翻译缓存。")
-
         print(f"<<< Mod '{mod_info['name']}' 处理完毕。")
 
     # --- 在所有翻译完成后，再生成元数据 ---
     print("\n--- 所有翻译任务完成，正在根据实际产出生成最终元数据 ---")
     cont_dir = output_path / "Cont"
-    final_mod_info_map = {}
-    if cont_dir.is_dir():
-        safe_name_to_info_map = {"".join(c for c in info['name'] if c.isalnum() or c in " .-_").strip(): info for info
-                                 in mod_info_map.values()}
-        for subdir in cont_dir.iterdir():
-            if subdir.is_dir() and subdir.name in safe_name_to_info_map:
-                original_info = safe_name_to_info_map[subdir.name]
-                final_mod_info_map[original_info['id']] = original_info
+    final_mod_info_map = {info['id']: info for subdir in cont_dir.iterdir() if subdir.is_dir() for info in
+                          mod_info_map.values() if
+                          "".join(c for c in info['name'] if c.isalnum() or c in " .-_").strip() == subdir.name}
 
     if not final_mod_info_map:
         print("警告: 未生成任何有效的翻译内容，将不创建元数据文件。")
@@ -1035,82 +908,87 @@ def main(config: dict):
 
     print(f"\n汉化包 '{CONFIG['pack_info']['name']}' 已在以下路径生成完毕: \n{output_path.resolve()}")
 
-def load_config(config_path: Path | str) -> Optional[dict]:
-    """加载并合并TOML配置文件。"""
 
-    if not isinstance(config_path, Path):
-        config_path = Path(config_path)
+def load_config(config_path: Path | str) -> Optional[dict]:
+    if not isinstance(config_path, Path): config_path = Path(config_path)
 
     print(f"--- 正在从 {config_path} 加载配置 ---")
     try:
         with open(config_path, "rb") as f:
             user_config = tomllib.load(f)
     except FileNotFoundError:
-        print(f"错误: 配置文件不存在于路径: {config_path}"); sys.exit(1)
+        print(f"错误: 配置文件不存在于路径: {config_path}")
+        sys.exit(1)
     except tomllib.TOMLDecodeError as e:
-        print(f"错误: 配置文件格式无效: {e}"); sys.exit(1)
+        print(f"错误: 配置文件格式无效: {e}")
+        sys.exit(1)
 
     if not user_config.get('enabled', True):
         print(f"配置 '{config_path.name}' 已被禁用(enabled=false)，将跳过。")
         return None
 
-    config = DEFAULT_CONFIG.copy()
-    if 'system' in user_config:
-        config['system'].update(user_config['system'])
+    # 深拷贝默认配置，避免修改原始字典
+    config = json.loads(json.dumps(DEFAULT_CONFIG))
 
+    # 递归合并配置
+    def merge_configs(base, new):
+        for k, v in new.items():
+            if isinstance(v, dict) and k in base and isinstance(base[k], dict):
+                merge_configs(base[k], v)
+            else:
+                base[k] = v
+
+    merge_configs(config, user_config)
+
+    # 检查必需部分
     for section in ['pack_info', 'versions', 'mod_ids', 'rules']:
-        if section not in user_config:
+        if section not in config:
             print(f"错误: 配置文件中缺少必需的部分: [{section}]")
             sys.exit(1)
-        config[section] = user_config[section]
 
     print("配置加载成功。")
     return config
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="RimWorld Mod 自动化翻译脚本。可以处理单个.toml文件或一个包含多个.toml文件的目录。"
-    )
-    parser.add_argument(
-        "config_path",
-        type=str,
-        help="要使用的项目配置文件(.toml)或包含配置文件的目录的路径"
-    )
+    parser = argparse.ArgumentParser(description="RimWorld Mod 自动化翻译脚本。")
+    parser.add_argument("config_path", type=str, help="要使用的项目配置文件(.toml)或包含配置文件的目录的路径")
     args = parser.parse_args()
 
-    # --- 智能路径处理 ---
     input_path = Path(args.config_path)
-    toml_files_to_process = []
-
     if not input_path.exists():
         print(f"错误: 提供的路径不存在: {input_path}")
         sys.exit(1)
 
+    toml_files_to_process = []
     if input_path.is_dir():
         print(f"检测到目录输入，将处理该目录下的所有 .toml 文件...")
         toml_files_to_process = sorted(list(input_path.glob("*.toml")))
         if not toml_files_to_process:
             print(f"警告: 在目录 '{input_path}' 中未找到任何 .toml 配置文件。")
-    elif input_path.is_file():
-        if input_path.suffix.lower() == ".toml":
-            toml_files_to_process.append(input_path)
-        else:
-            print(f"错误:提供的文件不是 .toml 文件: {input_path}")
+    elif input_path.is_file() and input_path.suffix.lower() == ".toml":
+        toml_files_to_process.append(input_path)
+    else:
+        print(f"错误: 输入路径既不是目录，也不是 .toml 文件: {input_path}")
 
     if not toml_files_to_process:
         print("没有找到要处理的配置文件，程序退出。")
         sys.exit(0)
 
-    # --- 批量处理循环 ---
     total_files = len(toml_files_to_process)
     print(f"\n准备开始批量处理，共计 {total_files} 个项目。")
 
     for i, config_file_path in enumerate(toml_files_to_process, 1):
-        print(f"\n{'=' * 25} 开始处理项目 {i}/{total_files} {'=' * 25}")
+        print(f"\n{'=' * 25} 开始处理项目 {i}/{total_files}: {config_file_path.name} {'=' * 25}")
         config_data = load_config(config_file_path)
         if config_data:
-            main(config_data)
+            try:
+                main(config_data)
+            except Exception as e:
+                print(f"\n{'!' * 10} 在处理项目 {config_file_path.name} 时发生严重错误: {e} {'!' * 10}")
+                import traceback
+
+                traceback.print_exc()
         else:
             print(f"跳过项目 {config_file_path.name}。")
         print(f"{'=' * 25} 项目 {config_file_path.name} 处理完毕 {'=' * 25}")

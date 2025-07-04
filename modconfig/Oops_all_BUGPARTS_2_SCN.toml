@@ -1,6 +1,6 @@
 # 这是一个RimWorld汉化包的项目配置文件示例
 
-enabled = true
+enabled = false
 
 # [1] 汉化包本身的信息
 [pack_info]
@@ -19,6 +19,7 @@ targets = ["1.5", "1.6"]
 # 需要汉化的Mod ID列表，用逗号分隔
 translate = "2896673577"
 
+
 # 作为翻译记忆库的旧汉化Mod ID列表 (可选)
 previous = "3515389487"
 
@@ -30,10 +31,65 @@ translatable_def_tags = [
     'notification', 'letterLabel', 'letterText', 'statement', 'beginLetter',
 ]
 
-# [5] 系统级配置 (可选，如果不存在，脚本会使用默认值)
+# --- 新增配置区 ---
+
+# [5] 自定义术语表 (可选)
+# 在这里添加的术语，会覆盖脚本内置的默认术语表，或补充新术语
+# 这对于特定Mod的主题翻译或个人偏好非常有用
+[custom_glossary]
+
+
+# [6] AI交互设置 (可选)
+[ai_settings]
+# 控制AI输出的随机性。较低的值（如0.2）使输出更稳定、可预测。
+# 较高的值（如0.7）会更有“创造力”，但也可能不稳定。
+temperature = 0.2
+
+# API调用失败后的最大重试次数
+max_retries = 5
+
+# 每次重试的基础延迟时间（秒），脚本会在此基础上进行指数退避
+retry_delay = 5
+
+
+# [7] 生成式翻译规则 (高级功能，可选)
+# 控制脚本如何处理需要根据材质动态生成的物品
+[generative_rules]
+# 预测生成物品defName的格式。{base_name}是父类Name，{stuff_defName}是材质defName
+# 默认是 "{base_name}_{stuff_defName}"
+prediction_pattern = "{base_name}{stuff_defName}"
+
+# 为生成式翻译添加自定义材质。如果某个Mod增加了新的金属或木材，可以在这里定义
+# 这样脚本在遇到使用这些新材质的生成器时，也能正确处理
+# category必须与脚本内置的（Woody, Stony, Metallic）或Mod中定义的<stuffCategory>一致
+custom_stuff = [
+    { category = "Metallic", defName = "Titanium", label_en = "titanium", label_cn = "钛合金" },
+    { category = "Woody", defName = "PetrifiedWood", label_en = "petrified wood", label_cn = "石化木" }
+]
+
+
+# [8] 汉化包图片生成 (可选)
+# 自定义自动生成的Preview.png和ModIcon.png的样式
+[image_generation]
+# 使用十六进制颜色码
+background_color_hex = "#334155" # 深蓝灰色
+text_color_hex = "#F8FAFC"       # 亮白色
+
+# 副标题模板。脚本会自动替换 {author}
+subtitle_template = "简体中文汉化 by {author}"
+
+
+# [9] 系统级配置 (可选，如果不存在，脚本会使用默认值)
 [system]
 slow_mode = true
+gemini_model = "gemini-2.5-flash"
+
+# 手动创建的“生成结果”辅助文件所在的目录名
+helper_files_root = "ProjectHelpers"
+
+# 最终汉化包的输出根目录
+output_base_dir = "translation_output"
+
 # steamcmd_path = "./steamcmd/steamcmd.sh"
 # steam_user = "anonymous"
 # steam_password = ""
-# gemini_model = "gemini-1.5-flash-latest"
