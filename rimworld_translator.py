@@ -361,15 +361,34 @@ def create_placeholder_images(about_dir: Path):
 
     # --- ModIcon.png ---
     icon_size = (256, 256)
-    icon_image = Image.new('RGB', icon_size, bg_color)
+    icon_image = Image.new('RGBA', icon_size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(icon_image)
+
+    # 生成图标文字的逻辑保持不变
     icon_text = "".join([word[0] for word in mod_name.split()[:2]]).upper() or (
         mod_name[0].upper() if mod_name else "T")
-    icon_font = get_font(120, 40)
-    icon_bbox = draw.textbbox((0, 0), icon_text, font=icon_font)
-    icon_pos = ((icon_size[0] - (icon_bbox[2] - icon_bbox[0])) / 2,
-                (icon_size[1] - (icon_bbox[3] - icon_bbox[1])) / 2 * 0.9)
-    draw.text(icon_pos, icon_text, fill=text_color, font=icon_font)
+
+    # 获取字体
+    icon_font = get_font(140, 50)  # 可以适当增大字体，因为描边会更突出
+
+    # 定义描边宽度，您可以调整这个值来改变镂空线条的粗细
+    stroke_width = 5
+
+    # xy=(cx, cy) 指定了图像的正中心点
+    # anchor="mm" 告诉Pillow，我们提供的坐标是文本的“正中心”（middle-middle）
+    # 这样Pillow会自动处理所有对齐，无需我们手动计算
+    icon_pos = (icon_size[0] / 2, icon_size[1] / 2)
+
+    draw.text(
+        xy=icon_pos,
+        text=icon_text,
+        font=icon_font,
+        anchor="mm",  # 设置文本锚点为中心
+        fill=bg_color,  # 【镂空效果】用背景色填充文字内部
+        stroke_width=stroke_width,  # 设置描边宽度
+        stroke_fill=text_color  # 【镂空效果】用文字颜色来描边
+    )
+
     icon_image.save(about_dir / "ModIcon.png")
     print("  -> 已根据配置生成 Preview.png 和 ModIcon.png。")
 
@@ -670,11 +689,12 @@ def process_standard_translation(client: genai.Client, history: List[types.Conte
 
 def process_def_injection_translation(client: genai.Client, history: List[types.Content], mod_path: Path,
                                       mod_info: Dict, memory: Dict, output_path: Path, abstract_defs: Dict,
-                                      def_inheritance_map: Dict, files_to_scan: List[Path]) -> Dict[
-    str, dict]:
+                                      def_inheritance_map: Dict, files_to_scan: List[Path]) -> Dict[str, dict]:
     """
-    处理注入式翻译（v5 - 修正了文件列表传递逻辑）。
-    该函数现在处理一个被传入的文件列表，而不再自己扫描文件。
+    处理注入式翻译。
+    - 使用 '//*[defName] | //*[@Abstract="True" and @Name]' XPath，确保不会错过任何具体定义或作为模板的抽象定义。
+    - 在函数内部通过Python逻辑精准区分三种Def类型：具体物品、抽象生成器、纯抽象父类。
+    - 动态、深度地扫描所有在config中定义的可翻译标签。
     """
     print(f"  -> 开始进行注入式翻译...")
 
@@ -685,15 +705,20 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
     print(f"  -> 正在解析 {len(files_to_scan)} 个定义/补丁/辅助文件...")
     all_targets_grouped = {}
     parser = etree.XMLParser(remove_blank_text=True, recover=True)
+    translatable_tags = CONFIG['rules'].get('translatable_def_tags', [])
 
     for file_path in files_to_scan:
         try:
             tree = etree.parse(str(file_path), parser)
-            # 修正：现在只在DefInjected处理流程中查找ThingDef，以避免处理其他类型的Def
-            for element in tree.xpath('//ThingDef'):
+
+            # 使用“或”逻辑的XPath，捕获所有具体定义和作为模板的抽象定义
+            for element in tree.xpath('//*[defName] | //*[@Abstract="True" and @Name]'):
+                is_abstract = element.get("Abstract", "False").lower() == 'true'
+
+                # --- 1. 继承逻辑：首先为当前元素构建完整的字段信息 ---
                 fields = {}
                 for sub in element:
-                    if isinstance(sub.tag, str) and sub.tag in CONFIG['rules']['translatable_def_tags'] and sub.text:
+                    if isinstance(sub.tag, str) and sub.tag in translatable_tags and sub.text:
                         fields[sub.tag] = sub.text.strip()
 
                 current_parent_name = element.get("ParentName")
@@ -705,42 +730,69 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
                             if tag not in fields: fields[tag] = text
                     current_parent_name = def_inheritance_map.get(current_parent_name)
 
+                # 如果继承后依然没有任何可翻译字段，则跳过
                 if not fields: continue
 
-                is_abstract = element.get("Abstract", "False").lower() == 'true'
-                stuff_category_names = element.xpath("stuffCategories/li/text()")
+                # --- 2. 核心分类处理逻辑 ---
                 def_type = element.tag
                 filename = file_path.name
-
                 if def_type not in all_targets_grouped: all_targets_grouped[def_type] = {}
                 if filename not in all_targets_grouped[def_type]: all_targets_grouped[def_type][filename] = {}
 
+                # --- 路径A：具体定义 (Concrete Def) ---
                 if not is_abstract:
                     def_name_node = element.find("defName")
                     if def_name_node is not None and def_name_node.text:
-                        base_name = def_name_node.text.strip()
-                        context = "A standard buildable item."
-                        if stuff_category_names:
-                            context = f"This is a blueprint for an item that can be made from various materials in categories like {', '.join(stuff_category_names)}. Provide a generic translation for the base item."
+                        def_name = def_name_node.text.strip()
+
+                        # 处理顶层标签
                         for tag, text in fields.items():
-                            key = f"{base_name}.{tag}"
-                            all_targets_grouped[def_type][filename][key] = {"text": text, "context": context}
-                elif is_abstract and stuff_category_names:
-                    base_name_for_generation = element.get("Name")
-                    if not base_name_for_generation: continue
-                    pattern = CONFIG.get('generative_rules', {}).get('prediction_pattern',
-                                                                     '{base_name}{stuff_defName}')
-                    for cat_name in stuff_category_names:
-                        cat_name = cat_name.strip()
-                        if cat_name in VANILLA_STUFFS:
-                            for stuff in VANILLA_STUFFS[cat_name]:
-                                generated_def_name = pattern.format(base_name=base_name_for_generation,
-                                                                    stuff_defName=stuff['defName'])
-                                context = f"An item generated from the abstract base '{base_name_for_generation}', made from material '{stuff['label_en']}'. The Chinese name for the material is '{stuff['label_cn']}'."
-                                for tag, text in fields.items():
-                                    key = f"{generated_def_name}.{tag}"
-                                    all_targets_grouped[def_type][filename][key] = {"text": text, "context": context}
-        except etree.XMLSyntaxError:
+                            key = f"{def_name}.{tag}"
+                            all_targets_grouped[def_type][filename][key] = {"text": text,
+                                                                            "context": f"Top-level {tag} for {def_type} '{def_name}'."}
+
+                        # 处理嵌套标签
+                        for tag_to_find in translatable_tags:
+                            for node in element.xpath(f'.//{tag_to_find}'):
+                                if not node.text or node.getparent() == element: continue
+                                owner_li_list = node.xpath('ancestor::li[key][1]')
+                                if owner_li_list:
+                                    owner_li = owner_li_list[0]
+                                    key_node = owner_li.find('key')
+                                    if key_node is not None and key_node.text:
+                                        component_key = key_node.text.strip()
+                                        key = f"{def_name}.{component_key}.{tag_to_find}"
+                                        if key not in all_targets_grouped[def_type][filename]:
+                                            all_targets_grouped[def_type][filename][key] = {"text": node.text.strip(),
+                                                                                            "context": f"{tag_to_find} for component '{component_key}' in '{def_name}'."}
+
+                # --- 路径B：抽象定义 (Abstract Def) ---
+                else:
+                    stuff_category_names = element.xpath("stuffCategories/li/text()")
+                    # B1: 如果是“抽象生成器”（有stuffCategories），则处理
+                    if stuff_category_names:
+                        base_name_for_generation = element.get("Name")
+                        if not base_name_for_generation: continue
+
+                        pattern = CONFIG.get('generative_rules', {}).get('prediction_pattern',
+                                                                         '{base_name}_{stuff_defName}')
+                        for cat_name in stuff_category_names:
+                            cat_name = cat_name.strip()
+                            if cat_name in VANILLA_STUFFS:
+                                for stuff in VANILLA_STUFFS[cat_name]:
+                                    generated_def_name = pattern.format(base_name=base_name_for_generation,
+                                                                        stuff_defName=stuff['defName'])
+                                    context = f"An item generated from the abstract base '{base_name_for_generation}', made from material '{stuff['label_en']}' (CN: '{stuff['label_cn']}')."
+                                    for tag, text in fields.items():
+                                        key = f"{generated_def_name}.{tag}"
+                                        all_targets_grouped[def_type][filename][key] = {"text": text,
+                                                                                        "context": context}
+                    # B2: 如果是“纯抽象父类”（没有stuffCategories），则忽略
+                    else:
+                        continue  # 不为它生成任何翻译条目
+
+        except etree.XMLSyntaxError as e:
+            print(f"警告：解析XML文件时发生错误 {file_path}: {e}")
             continue
 
     if not all_targets_grouped:
@@ -879,7 +931,7 @@ def main(config: dict):
                                               output_path)
         current_mod_cache.update(cache1)
 
-        # 【重要修正】将这个mod对应的、已包含辅助文件的列表传递给函数
+        # 将这个mod对应的、已包含辅助文件的列表传递给函数
         files_for_this_mod = def_files_for_mods.get(mod_id, [])
         cache2 = process_def_injection_translation(client, conversation_history, mod_path, mod_info, translation_memory,
                                                    output_path, abstract_defs, def_inheritance_map,
