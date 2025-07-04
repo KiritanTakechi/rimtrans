@@ -796,95 +796,88 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
 
     print(f"  -> 根据Mod规则，找到 {len(files_to_scan)} 个定义(Defs/Patches)文件，开始深度扫描...")
 
-    all_targets_by_type = {}
-    abstract_defs_map = {}  # 新增：用于存储抽象父类定义
+    abstract_defs = {}
+    def_inheritance_map = {}
+    concrete_def_elements = []  # 存储具体的def节点及其来源文件
     parser = etree.XMLParser(remove_blank_text=True, recover=True)
 
-    # --- 第一阶段: 扫描并学习所有抽象模板 ---
-    print("    -> 阶段1: 正在学习抽象定义(Abstract Defs)...")
+    # --- 阶段一: 扫描所有文件, 建立抽象模板库和继承关系图 ---
+    print("    -> 阶段1: 正在学习Mod定义和继承关系...")
     for file_path in files_to_scan:
         try:
             tree = etree.parse(str(file_path), parser)
-            for element in tree.xpath('//*[@Abstract="True"]'):  # 使用XPath直接找到所有抽象定义
+            # 处理文件中的所有节点（包括根节点下的和<value>节点下的）
+            for element in tree.xpath('//*[self::Defs or self::Patch]/*|//value/*'):
                 if not isinstance(element.tag, str): continue
-                template_name = element.get("Name")
-                if not template_name: continue
 
-                abstract_defs_map[template_name] = {}
-                for sub_element in element:
-                    if isinstance(sub_element.tag, str) and sub_element.tag in CONFIG['rules'][
-                        'translatable_def_tags'] and sub_element.text:
-                        abstract_defs_map[template_name][sub_element.tag] = sub_element.text.strip()
+                current_name = element.get("Name") or (
+                    element.find("defName").text if element.find("defName") is not None else None)
+                parent_name = element.get("ParentName")
+                if current_name and parent_name:
+                    def_inheritance_map[current_name.strip()] = parent_name.strip()
+
+                if element.get("Abstract", "False").lower() == 'true' and element.get("Name"):
+                    template_name = element.get("Name")
+                    if template_name not in abstract_defs: abstract_defs[template_name] = {}
+                    for sub in element:
+                        if isinstance(sub.tag, str) and sub.tag in CONFIG['rules'][
+                            'translatable_def_tags'] and sub.text:
+                            abstract_defs[template_name][sub.tag] = sub.text.strip()
+                elif element.find("defName") is not None:
+                    concrete_def_elements.append((element, file_path))
+
         except etree.XMLSyntaxError:
             continue
 
-    print(f"    -> 学习完成，找到 {len(abstract_defs_map)} 个抽象模板。")
+    print(f"    -> 学习完成，找到 {len(abstract_defs)} 个抽象模板和 {len(concrete_def_elements)} 个具体定义。")
 
-    # --- 第二阶段: 扫描并关联具体定义 ---
+    # --- 阶段二: 遍历具体定义，递归继承并分组 ---
+    all_targets_grouped = {}
     print("    -> 阶段2: 正在解析具体定义并处理继承...")
+    for element, file_path in concrete_def_elements:
+        def_name_node = element.find("defName")
+        if def_name_node is None or not def_name_node.text: continue
+        def_name = def_name_node.text.strip()
 
-    def find_translatables_in_elements(elements_iterator, group_dict):
-        for element in elements_iterator:
-            if not isinstance(element.tag, str): continue
+        fields_to_translate = {}
 
-            # 跳过抽象定义本身
-            if element.get("Abstract", "False").lower() == 'true': continue
+        # 递归向上查找所有父类的翻译字段
+        current_parent_name = element.get("ParentName")
+        visited_parents = set()
+        while current_parent_name and current_parent_name not in visited_parents:
+            visited_parents.add(current_parent_name)
+            if current_parent_name in abstract_defs:
+                for tag, text in abstract_defs[current_parent_name].items():
+                    if tag not in fields_to_translate:  # 子类优先，不覆盖
+                        fields_to_translate[tag] = text
+            current_parent_name = def_inheritance_map.get(current_parent_name)
 
-            def_name_node = element.find("defName")
-            if def_name_node is None or not def_name_node.text: continue
-            def_name = def_name_node.text.strip()
-            if any(char in def_name for char in ['{', '}', '(', ')', '/']): continue
+        # 最后采集自己的字段，这会覆盖所有父类的同名字段
+        for sub in element:
+            if isinstance(sub.tag, str) and sub.tag in CONFIG['rules']['translatable_def_tags'] and sub.text:
+                fields_to_translate[sub.tag] = sub.text.strip()
 
+        if fields_to_translate:
             def_type = element.tag
+            if def_type not in all_targets_grouped: all_targets_grouped[def_type] = {}
+            filename = file_path.name
+            if filename not in all_targets_grouped[def_type]: all_targets_grouped[def_type][filename] = {}
 
-            # 1. 收集自身的和继承的待翻译字段
-            fields_to_translate = {}
-            # 继承父类的字段
-            parent_name = element.get("ParentName")
-            if parent_name and parent_name in abstract_defs_map:
-                for tag, text in abstract_defs_map[parent_name].items():
-                    fields_to_translate[tag] = text
-            # 自身的字段会覆盖父类的
-            for sub_element in element:
-                if isinstance(sub_element.tag, str) and sub_element.tag in CONFIG['rules'][
-                    'translatable_def_tags'] and sub_element.text:
-                    fields_to_translate[sub_element.tag] = sub_element.text.strip()
-
-            # 2. 将最终的字段和defName组合起来
             for tag, text in fields_to_translate.items():
-                if def_type not in group_dict: group_dict[def_type] = {}
-                # 使用defName作为文件名的一部分，避免同名文件冲突
-                group_key = f"{def_name}_{def_type}"
-                if group_key not in group_dict[def_type]: group_dict[def_type][group_key] = {}
+                all_targets_grouped[def_type][filename][f"{def_name}.{tag}"] = text
 
-                injection_key = f"{def_name}.{tag}"
-                group_dict[def_type][group_key][injection_key] = text
-
-    for file_path in dict.fromkeys(files_to_scan):
-        try:
-            tree = etree.parse(str(file_path), parser);
-            root = tree.getroot()
-            if root is not None:
-                find_translatables_in_elements(root, all_targets_by_type)
-                for value_node in root.xpath('//value'):
-                    if len(value_node): find_translatables_in_elements(value_node, all_targets_by_type)
-        except etree.XMLSyntaxError:
-            continue
-
-    if not all_targets_by_type:
+    if not all_targets_grouped:
         print("  -> 未在Defs/Patches中找到可翻译内容。")
         return mod_cache
 
     # 3. 翻译并保存
     safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
-    for def_type, groups in all_targets_by_type.items():
+    for def_type, files in all_targets_grouped.items():
         print(f"    -> 发现Def类型: {def_type}")
-        for group_key, targets in groups.items():
-            # 使用组名作为文件名，保证唯一性
-            output_filename = f"{group_key}.xml"
-            print(f"      -> 正在处理来自 {group_key} 的 {len(targets)} 个条目")
+        for filename, targets in files.items():
+            print(f"      -> 正在处理来自 {filename} 的 {len(targets)} 个条目")
             output_dir = output_path / "Cont" / safe_mod_name / "Languages" / "ChineseSimplified" / "DefInjected" / def_type
-            output_file_path = output_dir / output_filename
+            output_file_path = output_dir / filename
             new_cache_entries = translate_and_save(client, history, targets, memory, output_file_path)
             mod_cache.update(new_cache_entries)
 
