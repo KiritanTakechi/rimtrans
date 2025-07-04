@@ -1,6 +1,6 @@
 # 这是一个RimWorld汉化包的项目配置文件示例
 
-enabled = false
+enabled = true
 
 # [1] 汉化包本身的信息
 [pack_info]
@@ -85,7 +85,7 @@ slow_mode = true
 gemini_model = "gemini-2.5-flash"
 
 # 手动创建的“生成结果”辅助文件所在的目录名
-helper_files_root = "ProjectHelpers"
+helper_files_root = "project_helpers"
 
 # 最终汉化包的输出根目录
 output_base_dir = "translation_output"

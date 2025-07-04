@@ -30,7 +30,7 @@ DEFAULT_CONFIG = {
         "gemini_model": "gemini-1.2-flash-latest",
         "slow_mode": False,
         "slow_mode_delay": 2,
-        "helper_files_root": "ProjectHelpers",
+        "helper_files_root": "project_helpers",
         "output_base_dir": "translation_output"
     },
     "ai_settings": {
@@ -326,7 +326,7 @@ def create_placeholder_images(about_dir: Path):
     subtitle_template = img_config['subtitle_template']
     subtitle_text = subtitle_template.format(author=author_name)
 
-    font_path = BASE_WORKING_DIR / "assets" / "Inter-Regular.ttf"
+    font_path = BASE_WORKING_DIR / "assets" / "NotoSansSC-Regular.ttf"
 
     def get_font(size: int, default_size: int = 20):
         try:
@@ -670,20 +670,26 @@ def process_standard_translation(client: genai.Client, history: List[types.Conte
 
 def process_def_injection_translation(client: genai.Client, history: List[types.Content], mod_path: Path,
                                       mod_info: Dict, memory: Dict, output_path: Path, abstract_defs: Dict,
-                                      def_inheritance_map: Dict) -> Dict[str, dict]:
+                                      def_inheritance_map: Dict, files_to_scan: List[Path]) -> Dict[
+    str, dict]:
+    """
+    处理注入式翻译（v5 - 修正了文件列表传递逻辑）。
+    该函数现在处理一个被传入的文件列表，而不再自己扫描文件。
+    """
     print(f"  -> 开始进行注入式翻译...")
 
-    helper_dir = CONFIG.get('system', {}).get('helper_files_root', DEFAULT_CONFIG['system']['helper_files_root'])
-    files_to_scan = find_source_files(mod_path, ["Defs", "Patches", helper_dir])
-    if not files_to_scan: return {}
+    if not files_to_scan:
+        print("  -> 没有需要注入翻译的文件。")
+        return {}
 
-    print(f"  -> 找到 {len(files_to_scan)} 个定义/补丁/辅助文件, 开始解析...")
+    print(f"  -> 正在解析 {len(files_to_scan)} 个定义/补丁/辅助文件...")
     all_targets_grouped = {}
     parser = etree.XMLParser(remove_blank_text=True, recover=True)
 
     for file_path in files_to_scan:
         try:
             tree = etree.parse(str(file_path), parser)
+            # 修正：现在只在DefInjected处理流程中查找ThingDef，以避免处理其他类型的Def
             for element in tree.xpath('//ThingDef'):
                 fields = {}
                 for sub in element:
@@ -713,7 +719,7 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
                     def_name_node = element.find("defName")
                     if def_name_node is not None and def_name_node.text:
                         base_name = def_name_node.text.strip()
-                        context = None
+                        context = "A standard buildable item."
                         if stuff_category_names:
                             context = f"This is a blueprint for an item that can be made from various materials in categories like {', '.join(stuff_category_names)}. Provide a generic translation for the base item."
                         for tag, text in fields.items():
@@ -722,11 +728,8 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
                 elif is_abstract and stuff_category_names:
                     base_name_for_generation = element.get("Name")
                     if not base_name_for_generation: continue
-
                     pattern = CONFIG.get('generative_rules', {}).get('prediction_pattern',
-                                                                     DEFAULT_CONFIG['generative_rules'][
-                                                                         'prediction_pattern'])
-
+                                                                     '{base_name}{stuff_defName}')
                     for cat_name in stuff_category_names:
                         cat_name = cat_name.strip()
                         if cat_name in VANILLA_STUFFS:
@@ -812,16 +815,19 @@ def main(config: dict):
     abstract_defs, def_inheritance_map = {}, {}
     parser = etree.XMLParser(remove_blank_text=True, recover=True)
 
-    # 获取辅助文件根目录的配置
     helper_root_path_str = CONFIG.get('system', {}).get('helper_files_root')
     helper_root_path = BASE_WORKING_DIR / helper_root_path_str if helper_root_path_str else None
+
+    # 创建字典来存储每个mod需要注入翻译的文件列表
+    def_files_for_mods = {}
 
     for mod_id in tqdm(new_ids, desc="构建全局知识库"):
         mod_path = mod_content_path / mod_id
 
-        # 【核心修改】在这里组合来自Mod下载目录和项目辅助目录的文件列表
+        # 收集Defs和Patches文件
         files_to_scan = find_source_files(mod_path, ["Defs", "Patches"])
 
+        # 添加辅助文件
         if helper_root_path and helper_root_path.is_dir():
             mod_helper_path = helper_root_path / mod_id
             if mod_helper_path.is_dir():
@@ -830,6 +836,10 @@ def main(config: dict):
                     print(f"\n  -> 为Mod {mod_id} 找到 {len(helper_files)} 个辅助文件。")
                     files_to_scan.extend(helper_files)
 
+        # 存储这个mod需要注入翻译的文件列表
+        def_files_for_mods[mod_id] = files_to_scan
+
+        # 使用完整的文件列表构建知识库
         for file_path in files_to_scan:
             try:
                 tree = etree.parse(str(file_path), parser)
@@ -869,9 +879,11 @@ def main(config: dict):
                                               output_path)
         current_mod_cache.update(cache1)
 
-        # 注意：这里的 process_def_injection_translation 函数现在会处理来自辅助文件的内容了
+        # 【重要修正】将这个mod对应的、已包含辅助文件的列表传递给函数
+        files_for_this_mod = def_files_for_mods.get(mod_id, [])
         cache2 = process_def_injection_translation(client, conversation_history, mod_path, mod_info, translation_memory,
-                                                   output_path, abstract_defs, def_inheritance_map)
+                                                   output_path, abstract_defs, def_inheritance_map,
+                                                   files_to_scan=files_for_this_mod)
         current_mod_cache.update(cache2)
 
         if current_mod_cache:
