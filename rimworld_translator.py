@@ -481,6 +481,22 @@ def create_self_translation(output_path: Path):
     print("为汉化包创建自翻译文件。")
 
 
+def load_xml_as_dict(file_path: Path) -> Dict[str, str]:
+    """将 RimWorld 语言 XML 文件解析为字典 (使用 lxml)。"""
+    translations = {}
+    try:
+        parser = etree.XMLParser(remove_blank_text=True)
+        tree = etree.parse(str(file_path), parser)
+        root = tree.getroot()
+        for elem in root:
+            # --- 修正点: 确保只处理元素节点，忽略注释等 ---
+            if isinstance(elem.tag, str) and elem.text:
+                translations[elem.tag] = elem.text.strip()
+    except etree.XMLSyntaxError as e:
+        print(f"警告: lxml解析文件失败: {file_path}, 错误: {e}")
+    return translations
+
+
 def find_language_files(mod_path: Path, lang_folder: str) -> List[Path]:
     """在 Mod 目录中查找指定语言的 XML 文件，修复了文件名冲突的bug。"""
     found_files_map = {}  # 使用相对路径作为键，避免文件名冲突
@@ -504,22 +520,6 @@ def find_language_files(mod_path: Path, lang_folder: str) -> List[Path]:
                 return sorted(list(lang_path.rglob("*.xml")))
 
     return sorted(list(found_files_map.values()))
-
-
-def load_xml_as_dict(file_path: Path) -> Dict[str, str]:
-    """将 RimWorld 语言 XML 文件解析为字典 (使用 lxml)。"""
-    translations = {}
-    try:
-        parser = etree.XMLParser(remove_blank_text=True)
-        tree = etree.parse(str(file_path), parser)
-        root = tree.getroot()
-        for elem in root:
-            # --- 修正点: 确保只处理元素节点，忽略注释等 ---
-            if isinstance(elem.tag, str) and elem.text:
-                translations[elem.tag] = elem.text.strip()
-    except etree.XMLSyntaxError as e:
-        print(f"警告: lxml解析文件失败: {file_path}, 错误: {e}")
-    return translations
 
 
 def fallback_scan(mod_path: Path) -> List[Path]:
@@ -553,28 +553,36 @@ def fallback_scan(mod_path: Path) -> List[Path]:
 
 
 def get_folders_to_scan(mod_path: Path) -> List[Path]:
-    """智能分析Mod结构，如果存在LoadFolders.xml则遵循其路径，否则回退到通用扫描。"""
+    """
+    智能分析Mod结构，如果存在LoadFolders.xml则遵循其路径，否则回退到通用扫描。
+    """
     load_folders_file = mod_path / "LoadFolders.xml"
-    content_folders = []
 
     if load_folders_file.is_file():
         print(f"  -> 检测到 LoadFolders.xml，将按其规则扫描。")
         try:
             tree = etree.parse(str(load_folders_file))
+            content_folders = []
+            # 查找当前所有目标版本对应的路径
             for version in CONFIG['versions']['targets']:
                 path_strings = tree.xpath(f'//v{version}/li/text()')
                 for path_str in path_strings:
+                    # 将路径中的'\'替换为'/'以兼容Windows路径分隔符
                     cleaned_path_str = path_str.strip().replace('\\', '/')
                     if cleaned_path_str == '/':
                         content_folders.append(mod_path)
                     elif cleaned_path_str:
                         content_folders.append(mod_path / cleaned_path_str)
+
             # 如果从目标版本中找到了路径，就使用这些路径
             if content_folders:
                 return list(dict.fromkeys([p for p in content_folders if p.is_dir()]))
+
         except etree.XMLSyntaxError:
             print(f"警告: LoadFolders.xml 解析失败，将回退到通用扫描模式。")
+            return fallback_scan(mod_path)
 
+    # 如果没有LoadFolders.xml，或在目标版本中没找到路径，则执行备用逻辑
     return fallback_scan(mod_path)
 
 
