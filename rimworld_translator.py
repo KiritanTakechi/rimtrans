@@ -497,93 +497,69 @@ def load_xml_as_dict(file_path: Path) -> Dict[str, str]:
     return translations
 
 
-def find_language_files(mod_path: Path, lang_folder: str) -> List[Path]:
-    """在 Mod 目录中查找指定语言的 XML 文件，修复了文件名冲突的bug。"""
-    found_files_map = {}  # 使用相对路径作为键，避免文件名冲突
-
-    def scan_lang_dir(lang_dir: Path):
-        if not lang_dir.is_dir(): return
-        for f in lang_dir.rglob("*.xml"):
-            relative_path = f.relative_to(lang_dir)
-            found_files_map[relative_path] = f
-
-    # 优先级顺序: 根目录 -> 版本目录 (后面的会覆盖前面的)
-    scan_lang_dir(mod_path / "Languages" / lang_folder)
-    for version in CONFIG['versions']['targets']:
-        scan_lang_dir(mod_path / version / "Languages" / lang_folder)
-
-    # 备用方案，用于结构非常不标准的Mod
-    if not found_files_map:
-        for p in mod_path.glob('**/Languages'):
-            lang_path = p / lang_folder
-            if lang_path.is_dir():
-                return sorted(list(lang_path.rglob("*.xml")))
-
-    return sorted(list(found_files_map.values()))
-
-
-def fallback_scan(mod_path: Path) -> List[Path]:
+def find_source_files(mod_path: Path, target_subfolders: List[str]) -> List[Path]:
     """
-    当LoadFolders.xml不存在或解析失败时的备用扫描逻辑。
-    会递归查找所有版本和根目录下的Defs和Patches文件夹。
+    通用、强大的文件扫描函数，是整个脚本文件查找的核心。
+    - 理解LoadFolders.xml
+    - 处理版本覆盖
+    - 处理复杂目录结构
     """
-    print("  -> 未找到或无法解析 LoadFolders.xml，启用备用扫描模式。")
-    folders_to_scan = []
+    found_files_map = {}  # 使用 {相对mod根目录的路径: 绝对Path对象} 来处理覆盖
 
-    # 按“根目录 -> 版本目录”的顺序获取所有内容文件夹
-    # 阶段一: 扫描根目录
-    for folder_name in ["Defs", "Patches"]:
-        root_path = mod_path / folder_name
-        if root_path.is_dir():
-            folders_to_scan.append(root_path)
-
-    # 阶段二: 按顺序扫描所有版本目录
-    for version in CONFIG['versions']['targets']:
-        version_root_path = mod_path / version
-        if not version_root_path.is_dir():
-            continue
-
-        # 在版本目录下，递归查找所有Defs和Patches文件夹
-        for sub_folder_name in ["Defs", "Patches"]:
-            for folder in version_root_path.rglob(sub_folder_name):
-                if folder.is_dir():
-                    folders_to_scan.append(folder)
-
-    return list(dict.fromkeys(folders_to_scan))  # 去重并返回
-
-
-def get_folders_to_scan(mod_path: Path) -> List[Path]:
-    """
-    智能分析Mod结构，如果存在LoadFolders.xml则遵循其路径，否则回退到通用扫描。
-    """
+    # 1. 确定要扫描的内容文件夹列表
     load_folders_file = mod_path / "LoadFolders.xml"
+    content_folders_in_order = []
 
+    # 优先使用LoadFolders.xml
     if load_folders_file.is_file():
-        print(f"  -> 检测到 LoadFolders.xml，将按其规则扫描。")
         try:
             tree = etree.parse(str(load_folders_file))
-            content_folders = []
-            # 查找当前所有目标版本对应的路径
-            for version in CONFIG['versions']['targets']:
-                path_strings = tree.xpath(f'//v{version}/li/text()')
+            # 按版本顺序收集，以实现覆盖
+            for version in [""] + CONFIG['versions']['targets']:  # "" 代表根目录
+                version_tag = f"v{version}" if version else "*"  # XPath处理根目录下的li
+
+                # 如果是根目录, 查找不在任何版本标签下的li
+                if not version:
+                    # 这个XPath有点复杂，但能精确找到只在<loadFolders>下一级的<li>
+                    path_strings = tree.xpath('/loadFolders/li/text()')
+                else:
+                    path_strings = tree.xpath(f'//v{version}/li/text()')
+
                 for path_str in path_strings:
-                    # 将路径中的'\'替换为'/'以兼容Windows路径分隔符
                     cleaned_path_str = path_str.strip().replace('\\', '/')
                     if cleaned_path_str == '/':
-                        content_folders.append(mod_path)
+                        content_folders_in_order.append(mod_path)
                     elif cleaned_path_str:
-                        content_folders.append(mod_path / cleaned_path_str)
+                        content_folders_in_order.append(mod_path / cleaned_path_str)
 
-            # 如果从目标版本中找到了路径，就使用这些路径
-            if content_folders:
-                return list(dict.fromkeys([p for p in content_folders if p.is_dir()]))
-
+            print(f"  -> 根据 LoadFolders.xml 规则，确定扫描 {len(content_folders_in_order)} 个内容文件夹路径。")
         except etree.XMLSyntaxError:
             print(f"警告: LoadFolders.xml 解析失败，将回退到通用扫描模式。")
-            return fallback_scan(mod_path)
+            content_folders_in_order = []  # 清空，以便触发备用逻辑
 
-    # 如果没有LoadFolders.xml，或在目标版本中没找到路径，则执行备用逻辑
-    return fallback_scan(mod_path)
+    # 如果没有LoadFolders.xml或解析失败，使用备用扫描逻辑
+    if not content_folders_in_order:
+        print("  -> 未找到或无法解析 LoadFolders.xml，启用通用扫描模式。")
+        # 根目录优先
+        content_folders_in_order.append(mod_path)
+        # 然后是版本目录
+        for version in CONFIG['versions']['targets']:
+            version_root_path = mod_path / version
+            if version_root_path.is_dir():
+                content_folders_in_order.append(version_root_path)
+
+    # 2. 遍历内容文件夹，查找目标子文件夹
+    for content_path in list(dict.fromkeys(content_folders_in_order)):
+        if not content_path.is_dir(): continue
+        for target in target_subfolders:
+            search_path = content_path / target
+            if search_path.is_dir():
+                for f in search_path.rglob("*.xml"):
+                    # 使用相对于mod_path的路径作为key，确保全局唯一性
+                    unique_key = f.relative_to(mod_path)
+                    found_files_map[unique_key] = f
+
+    return sorted(list(found_files_map.values()))
 
 
 def build_translation_memory(prev_ids: List[str], workshop_path: Path) -> Dict[str, dict]:
@@ -783,8 +759,11 @@ def translate_and_save(client: genai.Client, history: List[types.Content], targe
 def process_standard_translation(client: genai.Client, history: List[types.Content], mod_path: Path, mod_info: Dict,
                                  memory: Dict, output_path: Path) -> Dict[str, dict]:
     """处理 Languages/English 文件夹中的标准翻译，并返回新生成的缓存条目。"""
+    print(f"  -> 开始进行接口翻译...")
+
     mod_cache = {}
-    english_files = find_language_files(mod_path, "English")
+    english_files = find_source_files(mod_path, ["Languages/English"])
+
     if not english_files:
         return mod_cache
 
@@ -809,14 +788,11 @@ def process_standard_translation(client: genai.Client, history: List[types.Conte
 def process_def_injection_translation(client: genai.Client, history: List[types.Content], mod_path: Path,
                                       mod_info: Dict, memory: Dict, output_path: Path) -> Dict[str, dict]:
     """处理Defs/和Patches/文件夹中的注入式翻译，并返回新生成的缓存条目。"""
+    print(f"  -> 开始进行注入翻译...")
+
     mod_cache = {}
 
-    folders_to_scan = get_folders_to_scan(mod_path)
-    if not folders_to_scan: return mod_cache
-
-    files_to_scan = []
-    for folder in folders_to_scan:
-        files_to_scan.extend(folder.rglob("*.xml"))
+    files_to_scan = find_source_files(mod_path, ["Defs", "Patches"])
 
     if not files_to_scan: return mod_cache
 
@@ -920,7 +896,7 @@ def main(config: dict):
                                                    output_path)
         current_mod_cache.update(cache2)
 
-        # --- 新增：为当前处理的Mod写入新的缓存文件 ---
+        # --- 为当前处理的Mod写入新的缓存文件 ---
         if current_mod_cache:
             safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
             cache_file_path = output_path / "Cont" / safe_mod_name / "translation_cache.json"
