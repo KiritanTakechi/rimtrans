@@ -1,23 +1,21 @@
 # -*- coding: utf-8 -*-
+import argparse
+import json
 import os
 import random
-import sys
 import subprocess
+import sys
 import time
-import json
-
-import argparse
 import tomllib
-
-from PIL import Image, ImageDraw, ImageFont
-from google.genai.errors import APIError
-from lxml import etree
 from pathlib import Path
-from pydantic import BaseModel, Field
 from typing import Dict, List, Optional
 
+from PIL import Image, ImageDraw, ImageFont
 import google.genai as genai
 from google.genai import types
+from google.genai.errors import APIError
+from lxml import etree
+from pydantic import BaseModel, Field
 from tqdm import tqdm
 
 # --- 全局配置  ---
@@ -287,11 +285,6 @@ def get_mod_info(mod_path: Path) -> Optional[Dict[str, str]]:
 def create_placeholder_images(about_dir: Path):
     """使用Pillow库和自带的Inter字体创建占位符图片，并动态调整字体大小以适应文本。"""
     print("正在生成占位符图片...")
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-    except ImportError:
-        print("警告: Pillow库未安装，无法生成图片。请运行 'pip install Pillow'。")
-        return
 
     mod_name = CONFIG['pack_info']['name']
     author_name = CONFIG['pack_info']['author']
@@ -442,7 +435,7 @@ def create_about_file(output_path: Path, mod_info_map: Dict[str, dict]):
         published_file_id_path.touch()
         print("未提供 'previous' ID，已创建空的 PublishedFileId.txt 用于首次上传。")
 
-    create_placeholder_images(about_dir, CONFIG['pack_info']['name'], CONFIG['pack_info']['author'])
+    create_placeholder_images(about_dir)
 
 
 def create_load_folders_file(output_path: Path, mod_info_map: Dict[str, dict]):
@@ -527,6 +520,62 @@ def load_xml_as_dict(file_path: Path) -> Dict[str, str]:
     except etree.XMLSyntaxError as e:
         print(f"警告: lxml解析文件失败: {file_path}, 错误: {e}")
     return translations
+
+
+def fallback_scan(mod_path: Path) -> List[Path]:
+    """
+    当LoadFolders.xml不存在或解析失败时的备用扫描逻辑。
+    会递归查找所有版本和根目录下的Defs和Patches文件夹。
+    """
+    print("  -> 未找到或无法解析 LoadFolders.xml，启用备用扫描模式。")
+    folders_to_scan = []
+
+    # 按“根目录 -> 版本目录”的顺序获取所有内容文件夹
+    # 阶段一: 扫描根目录
+    for folder_name in ["Defs", "Patches"]:
+        root_path = mod_path / folder_name
+        if root_path.is_dir():
+            folders_to_scan.append(root_path)
+
+    # 阶段二: 按顺序扫描所有版本目录
+    for version in CONFIG['versions']['targets']:
+        version_root_path = mod_path / version
+        if not version_root_path.is_dir():
+            continue
+
+        # 在版本目录下，递归查找所有Defs和Patches文件夹
+        for sub_folder_name in ["Defs", "Patches"]:
+            for folder in version_root_path.rglob(sub_folder_name):
+                if folder.is_dir():
+                    folders_to_scan.append(folder)
+
+    return list(dict.fromkeys(folders_to_scan))  # 去重并返回
+
+
+def get_folders_to_scan(mod_path: Path) -> List[Path]:
+    """智能分析Mod结构，如果存在LoadFolders.xml则遵循其路径，否则回退到通用扫描。"""
+    load_folders_file = mod_path / "LoadFolders.xml"
+    content_folders = []
+
+    if load_folders_file.is_file():
+        print(f"  -> 检测到 LoadFolders.xml，将按其规则扫描。")
+        try:
+            tree = etree.parse(str(load_folders_file))
+            for version in CONFIG['versions']['targets']:
+                path_strings = tree.xpath(f'//v{version}/li/text()')
+                for path_str in path_strings:
+                    cleaned_path_str = path_str.strip().replace('\\', '/')
+                    if cleaned_path_str == '/':
+                        content_folders.append(mod_path)
+                    elif cleaned_path_str:
+                        content_folders.append(mod_path / cleaned_path_str)
+            # 如果从目标版本中找到了路径，就使用这些路径
+            if content_folders:
+                return list(dict.fromkeys([p for p in content_folders if p.is_dir()]))
+        except etree.XMLSyntaxError:
+            print(f"警告: LoadFolders.xml 解析失败，将回退到通用扫描模式。")
+
+    return fallback_scan(mod_path)
 
 
 def build_translation_memory(prev_ids: List[str], workshop_path: Path) -> Dict[str, dict]:
@@ -653,6 +702,10 @@ def translate_and_save(client: genai.Client, history: List[types.Content], targe
     通用翻译和保存逻辑。
     使用三方校对记忆库，并返回为新缓存准备的数据。
     """
+    # 定义错误/占位符前缀
+    ERROR_PREFIX = "【API错误】"
+    ORIGINAL_PREFIX = "【原文】"
+
     to_translate_dict = {}
     final_translation_dict = {}
     new_cache_data = {}
@@ -661,15 +714,20 @@ def translate_and_save(client: genai.Client, history: List[types.Content], targe
         if key in memory:
             old_en_text = memory[key].get('en', '')
             old_cn_text = memory[key].get('cn', '')
-            # 如果新旧英文一致，直接使用旧中文
-            if new_en_text == old_en_text:
+
+            is_en_text_same = (new_en_text == old_en_text)
+            is_cn_text_valid = not (isinstance(old_cn_text, str) and (
+                    old_cn_text.startswith(ERROR_PREFIX) or old_cn_text.startswith(ORIGINAL_PREFIX)))
+
+            if is_en_text_same and is_cn_text_valid:
+                # 完美匹配：直接使用旧翻译
                 final_translation_dict[key] = old_cn_text
                 new_cache_data[key] = {'en': new_en_text, 'cn': old_cn_text}
             else:
-                # 英文原文已更新，需要重翻
+                # 需要重翻：原文已更新 或 上次翻译失败
                 to_translate_dict[key] = new_en_text
         else:
-            # 全新条目，需要翻译
+            # 全新条目：直接加入待翻译列表
             to_translate_dict[key] = new_en_text
 
     if to_translate_dict:
@@ -716,11 +774,13 @@ def translate_and_save(client: genai.Client, history: List[types.Content], targe
 
 def process_standard_translation(client: genai.Client, history: List[types.Content], mod_path: Path, mod_info: Dict,
                                  memory: Dict, output_path: Path) -> Dict[str, dict]:
+    """处理 Languages/English 文件夹中的标准翻译，并返回新生成的缓存条目。"""
     mod_cache = {}
     english_files = find_language_files(mod_path, "English")
-    if not english_files: return mod_cache
+    if not english_files:
+        return mod_cache
 
-    print(f"  -> 找到 {len(english_files)} 个标准语言文件，在当前会话中处理...")
+    print(f"  -> 找到 {len(english_files)} 个标准语言文件...")
     for file_path in english_files:
         targets = load_xml_as_dict(file_path)
         if not targets: continue
@@ -734,39 +794,25 @@ def process_standard_translation(client: genai.Client, history: List[types.Conte
 
         new_cache_entries = translate_and_save(client, history, targets, memory, output_file_path)
         mod_cache.update(new_cache_entries)
+
     return mod_cache
 
 
 def process_def_injection_translation(client: genai.Client, history: List[types.Content], mod_path: Path,
-                                      mod_info: Dict, memory: Dict, output_path: Path):
-    """处理Defs/和Patches/文件夹中的注入式翻译，采用最终的、兼容复杂结构的扫描逻辑。"""
+                                      mod_info: Dict, memory: Dict, output_path: Path) -> Dict[str, dict]:
+    """处理Defs/和Patches/文件夹中的注入式翻译，并返回新生成的缓存条目。"""
     mod_cache = {}
 
-    # 1. 按“根目录 -> 版本1 -> 版本2...”的顺序获取所有待扫描文件
-    files_to_scan_in_order = []
+    folders_to_scan = get_folders_to_scan(mod_path)
+    if not folders_to_scan: return mod_cache
 
-    # 阶段一: 扫描根目录
-    for folder_name in ["Defs", "Patches"]:
-        root_path = mod_path / folder_name
-        if root_path.is_dir():
-            files_to_scan_in_order.extend(root_path.rglob("*.xml"))
+    files_to_scan = []
+    for folder in folders_to_scan:
+        files_to_scan.extend(folder.rglob("*.xml"))
 
-    # 阶段二: 按顺序扫描所有版本目录
-    for version in CONFIG['versions']['targets']:
-        version_root_path = mod_path / version
-        if not version_root_path.is_dir():
-            continue
+    if not files_to_scan: return mod_cache
 
-        # 在版本目录下，递归查找所有Defs和Patches文件夹
-        for sub_folder_name in ["Defs", "Patches"]:
-            # 使用rglob可以找到所有深度的匹配项，如 1.5/Common/Defs, 1.5/Mods/SomeMod/Patches
-            for folder in version_root_path.rglob(sub_folder_name):
-                if folder.is_dir():
-                    files_to_scan_in_order.extend(folder.rglob("*.xml"))
-
-    if not files_to_scan_in_order: return
-
-    print(f"  -> 找到 {len(files_to_scan_in_order)} 个定义(Defs/Patches)文件，开始扫描...")
+    print(f"  -> 根据Mod规则，找到 {len(files_to_scan)} 个定义(Defs/Patches)文件，开始扫描...")
 
     all_targets_grouped = {}
     parser = etree.XMLParser(remove_blank_text=True, recover=True)
@@ -786,7 +832,7 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
                     if source_filename not in group_dict[def_type]: group_dict[def_type][source_filename] = {}
                     group_dict[def_type][source_filename][f"{def_name}.{sub_element.tag}"] = sub_element.text.strip()
 
-    for file_path in dict.fromkeys(files_to_scan_in_order):  # 使用dict.fromkeys去重，同时保持顺序
+    for file_path in dict.fromkeys(files_to_scan):
         try:
             tree = etree.parse(str(file_path), parser)
             root = tree.getroot()
@@ -794,12 +840,12 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
             find_translatables_in_elements(root, file_path, all_targets_grouped)
             for value_node in root.xpath('//value'):
                 if len(value_node): find_translatables_in_elements(value_node, file_path, all_targets_grouped)
-        except etree.XMLSyntaxError as e:
+        except etree.XMLSyntaxError:
             continue
 
     if not all_targets_grouped:
         print("  -> 未在Defs/Patches中找到可翻译内容。")
-        return
+        return mod_cache
 
     safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
 
@@ -809,7 +855,6 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
             print(f"      -> 正在处理来自 {filename} 的 {len(targets)} 个条目")
             output_dir = output_path / "Cont" / safe_mod_name / "Languages" / "ChineseSimplified" / "DefInjected" / def_type
             output_file_path = output_dir / filename
-            translate_and_save(client, history, targets, memory, output_file_path)
             new_cache_entries = translate_and_save(client, history, targets, memory, output_file_path)
             mod_cache.update(new_cache_entries)
 
@@ -834,10 +879,6 @@ def main(config: dict):
         mod_path = mod_content_path / mod_id
         if mod_path.is_dir():
             info = get_mod_info(mod_path)
-
-            if info is None:
-                print(f"警告: 无法为Mod {mod_id} 解析元数据，将使用ID作为名称。")
-                info = {"name": mod_id, "packageId": mod_id}
 
             info = info if info else {"name": mod_id, "packageId": mod_id}
             info['id'] = mod_id

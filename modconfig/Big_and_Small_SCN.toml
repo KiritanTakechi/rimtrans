@@ -7,6 +7,7 @@ enabled = true
 name = "Big and Small SCN"
 author = "Kiritan"
 description = """
+Xeno Insectoid Hive 的前置Mod汉化已发布，自行订阅。
 这是一个自动生成的汉化包，为以下Mod提供简体中文支持：
 """ # 使用三个引号可以创建多行字符串
 
