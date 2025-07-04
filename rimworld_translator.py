@@ -129,7 +129,7 @@ RIMWORLD_GLOSSARY = {
     "Wall": "墙", "Warg": "座狼", "Weapon": "武器", "Weapons": "武器", "Wild Plants": "野生植物",
     "Wind Turbine": "风力发电机", "Wood": "木材", "Wood-fired generator": "木柴发电机", "Wood floor": "木地板",
     "Work To Make": "工作量", "World": "世界", "World Generation": "世界生成", "Yorkshire terrier": "约克夏㹴",
-    "Zone": "区域", "pawn": "殖民者", "raid": "袭击"
+    "Zone": "区域", "pawn": "殖民者", "raid": "袭击", "bundle": "捆堆", "pile": "织物"
 }
 
 VANILLA_STUFFS = {
@@ -626,7 +626,7 @@ def get_setup_prompt() -> str:
 请严格遵守以下规则：
 1.  **保持键值不变**: 绝对不要修改 `key`、`source_text` 或 `context_info` 字段。
 2.  **精准翻译**: 确保翻译内容符合《边缘世界》的语境。
-3.  **利用上下文**: 如果提供了 `context_info` 字段，你必须参考它来生成更地道的翻译。例如，如果 `source_text` 是 "Crate A"，而 `context_info` 包含 "Woody"，你应该倾向于翻译成“A型木制板条箱”或“A型木制箱子”，而不是简单的“A型板条箱”。
+3.  **利用上下文**: 如果提供了 `context_info` 字段，你必须参考它来生成更地道的翻译。例如，如果 `source_text` 是 "Bundle A"，而 `context_info` 包含 "Leathery"，你应该倾向于翻译成“A型皮革捆堆”或“A型皮革捆包”，而不是简单的“A型捆堆”。
 4.  **返回完整JSON**: 你的输出必须是完整的、包含所有原始条目的JSON数组。
 5.  **处理换行符标记**: 文本中的 `[BR]` 标记是换行符占位符，必须在译文中原样保留。"""
     glossary_prompt_part = "6. **术语统一**: 这是最重要的规则。请严格参考以下术语表进行翻译...\n"
@@ -820,8 +820,13 @@ def process_standard_translation(client: genai.Client, history: List[types.Conte
 def process_def_injection_translation(client: genai.Client, history: List[types.Content], mod_path: Path,
                                       mod_info: Dict, memory: Dict, output_path: Path, abstract_defs: Dict,
                                       def_inheritance_map: Dict) -> Dict[str, dict]:
-    """处理注入式翻译，使用预先构建的全局知识库进行继承和材质解析。"""
-    print(f"  -> 开始进行注入翻译...")
+    """
+    处理注入式翻译（最终修正版 v3）。
+    - 严格区分三种ThingDef类型：具体物品、抽象生成器、纯抽象父类。
+    - 仅为“具体物品”和“抽象生成器生成的物品”创建翻译条目。
+    - 忽略纯粹用于继承的抽象父类，避免生成不必要的翻译。
+    """
+    print(f"  -> 开始进行注入翻译 (使用最终修正逻辑 v3)...")
 
     mod_cache = {}
     files_to_scan = find_source_files(mod_path, ["Defs", "Patches"])
@@ -835,49 +840,78 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
     for file_path in files_to_scan:
         try:
             tree = etree.parse(str(file_path), parser)
-            # 处理文件中所有可能的定义节点
-            for element in tree.xpath('//*[self::Defs or self::Patch]/*|//value/*'):
-                if not isinstance(element.tag, str) or element.get("Abstract", "False").lower() == 'true':
-                    continue
+            for element in tree.xpath('//ThingDef'):
 
-                def_name_node = element.find("defName")
-                if def_name_node is None or not def_name_node.text: continue
-                def_name = def_name_node.text.strip()
-                if any(char in def_name for char in ['{', '}', '(', ')', '/']): continue
-
-                # 递归继承
+                # --- 1. 继承逻辑：首先，为当前元素构建完整的字段信息 ---
                 fields = {}
+                # 优先使用元素自身的字段
+                for sub in element:
+                    if isinstance(sub.tag, str) and sub.tag in CONFIG['rules']['translatable_def_tags'] and sub.text:
+                        fields[sub.tag] = sub.text.strip()
+
+                # 向上递归查找父类来填充缺失的字段
                 current_parent_name = element.get("ParentName")
                 visited_parents = set()
                 while current_parent_name and current_parent_name not in visited_parents:
                     visited_parents.add(current_parent_name)
                     if current_parent_name in abstract_defs:
                         for tag, text in abstract_defs[current_parent_name].items():
-                            if tag not in fields: fields[tag] = text
+                            if tag not in fields:
+                                fields[tag] = text
                     current_parent_name = def_inheritance_map.get(current_parent_name)
-
-                for sub in element:
-                    if isinstance(sub.tag, str) and sub.tag in CONFIG['rules']['translatable_def_tags'] and sub.text:
-                        fields[sub.tag] = sub.text.strip()
 
                 if not fields: continue
 
-                # 材质处理
+                # --- 2. 核心分类与处理逻辑 ---
+                is_abstract = element.get("Abstract", "False").lower() == 'true'
+                stuff_category_names = element.xpath("stuffCategories/li/text()")
+
                 def_type = element.tag
-                if def_type not in all_targets_grouped: all_targets_grouped[def_type] = {}
                 filename = file_path.name
+                if def_type not in all_targets_grouped: all_targets_grouped[def_type] = {}
                 if filename not in all_targets_grouped[def_type]: all_targets_grouped[def_type][filename] = {}
 
-                stuff_categories = element.xpath("stuffCategories/li/text()")
-                context = f"stuffable with: {', '.join(stuff_categories)}" if stuff_categories else None
-                for tag, text in fields.items():
-                    all_targets_grouped[def_type][filename][f"{def_name}.{tag}"] = {"text": text, "context": context}
+                # --- 路径A：具体物品 (Concrete ThingDef) ---
+                # 无论是可填充材质的还是不可的，只要不是抽象的，就直接翻译它的defName。
+                if not is_abstract:
+                    def_name_node = element.find("defName")
+                    if def_name_node is not None and def_name_node.text:
+                        base_name = def_name_node.text.strip()
+                        context = None
+                        if stuff_category_names:
+                            context = f"This is a blueprint for an item that can be made from various materials in categories like {', '.join(stuff_category_names)}. Provide a generic translation for the base item."
+
+                        for tag, text in fields.items():
+                            key = f"{base_name}.{tag}"
+                            all_targets_grouped[def_type][filename][key] = {"text": text, "context": context}
+
+                # --- 路径B：抽象生成器 (Abstract Generator) ---
+                # 必须是抽象的，且有材质类别。
+                elif is_abstract and stuff_category_names:
+                    base_name_for_generation = element.get("Name")
+                    if not base_name_for_generation: continue
+
+                    for cat_name in stuff_category_names:
+                        cat_name = cat_name.strip()
+                        if cat_name in VANILLA_STUFFS:
+                            for stuff in VANILLA_STUFFS[cat_name]:
+                                generated_def_name = f"{base_name_for_generation}_{stuff['defName']}"
+                                context = f"An item generated from the abstract base '{base_name_for_generation}', made from material '{stuff['label_en']}'. The Chinese name for the material is '{stuff['label_cn']}'. Please provide a specific translation."
+                                for tag, text in fields.items():
+                                    key = f"{generated_def_name}.{tag}"
+                                    all_targets_grouped[def_type][filename][key] = {"text": text, "context": context}
+
+                # --- 路径C：纯抽象父类 (Pure Abstract Parent) ---
+                # is_abstract为True，但没有stuffCategories。这些将被自然忽略，不执行任何操作。
+
         except etree.XMLSyntaxError:
             continue
 
-    if not all_targets_grouped: return mod_cache
+    if not all_targets_grouped:
+        print("  -> 未找到可供注入翻译的条目。")
+        return mod_cache
 
-    # 翻译和保存
+    # --- 后续的翻译和保存逻辑保持不变 ---
     safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
     for def_type, files in all_targets_grouped.items():
         for filename, targets in files.items():
@@ -887,6 +921,7 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
             output_file_path = output_dir / filename
             new_cache_entries = translate_and_save(client, history, targets, memory, output_file_path)
             mod_cache.update(new_cache_entries)
+
     return mod_cache
 
 
