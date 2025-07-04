@@ -668,31 +668,23 @@ def process_standard_translation(client: genai.Client, history: List[types.Conte
     return mod_cache
 
 
-def process_def_injection_translation(client: genai.Client, history: List[types.Content],
-                                      files_to_process: List[Path],  # <--- 修改点：不再接收mod_path，而是直接接收文件列表
-                                      mod_info: Dict, memory: Dict, output_path: Path,
-                                      abstract_defs: Dict, def_inheritance_map: Dict) -> Dict[str, dict]:
-    """
-    处理注入式翻译（v5 - 已修复文件列表传递错误）。
-    - 直接使用main函数传递的、包含辅助文件的完整列表进行处理。
-    """
-    print(f"  -> 开始进行注入式翻译 (v5 - 使用主文件列表)...")
+def process_def_injection_translation(client: genai.Client, history: List[types.Content], mod_path: Path,
+                                      mod_info: Dict, memory: Dict, output_path: Path, abstract_defs: Dict,
+                                      def_inheritance_map: Dict) -> Dict[str, dict]:
+    print(f"  -> 开始进行注入式翻译...")
 
-    # 【核心修正】删除函数内部自己的文件查找逻辑，直接使用传入的列表
-    if not files_to_process:
-        print("  -> 没有需要进行注入式翻译的文件。")
-        return {}
+    helper_dir = CONFIG.get('system', {}).get('helper_files_root', DEFAULT_CONFIG['system']['helper_files_root'])
+    files_to_scan = find_source_files(mod_path, ["Defs", "Patches", helper_dir])
+    if not files_to_scan: return {}
 
-    print(f"  -> 正在处理 {len(files_to_process)} 个定义/补丁/辅助文件...")
+    print(f"  -> 找到 {len(files_to_scan)} 个定义/补丁/辅助文件, 开始解析...")
     all_targets_grouped = {}
     parser = etree.XMLParser(remove_blank_text=True, recover=True)
 
-    # 直接遍历传入的文件列表
-    for file_path in files_to_process:
+    for file_path in files_to_scan:
         try:
             tree = etree.parse(str(file_path), parser)
             for element in tree.xpath('//ThingDef'):
-
                 fields = {}
                 for sub in element:
                     if isinstance(sub.tag, str) and sub.tag in CONFIG['rules']['translatable_def_tags'] and sub.text:
@@ -721,7 +713,7 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
                     def_name_node = element.find("defName")
                     if def_name_node is not None and def_name_node.text:
                         base_name = def_name_node.text.strip()
-                        context = "A standard buildable item."
+                        context = None
                         if stuff_category_names:
                             context = f"This is a blueprint for an item that can be made from various materials in categories like {', '.join(stuff_category_names)}. Provide a generic translation for the base item."
                         for tag, text in fields.items():
@@ -732,7 +724,8 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
                     if not base_name_for_generation: continue
 
                     pattern = CONFIG.get('generative_rules', {}).get('prediction_pattern',
-                                                                     '{base_name}_{stuff_defName}')
+                                                                     DEFAULT_CONFIG['generative_rules'][
+                                                                         'prediction_pattern'])
 
                     for cat_name in stuff_category_names:
                         cat_name = cat_name.strip()
@@ -744,8 +737,7 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
                                 for tag, text in fields.items():
                                     key = f"{generated_def_name}.{tag}"
                                     all_targets_grouped[def_type][filename][key] = {"text": text, "context": context}
-        except etree.XMLSyntaxError as e:
-            print(f"  -> 警告: 解析文件失败 {file_path.name}, 错误: {e}")
+        except etree.XMLSyntaxError:
             continue
 
     if not all_targets_grouped:
