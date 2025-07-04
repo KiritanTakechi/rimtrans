@@ -140,6 +140,9 @@ class TranslationItem(BaseModel):
     key: str = Field(description="The original XML tag or injection key. This field MUST NOT be changed or translated.")
     source_text: str = Field(description="The original English text to be translated.")
     translated_text: str = Field(description="The translated Simplified Chinese text. This is the field you need to fill.")
+    context_info: Optional[str] = Field(None,
+                                        description="Contextual information about the source text, like what kind of material it's made of (e.g., 'stuffable with Woody, Stony'). The AI should use this for more accurate translation.")
+
 
 # --- “包装器” Pydantic 模型 ---
 class TranslationResponse(BaseModel):
@@ -598,25 +601,31 @@ def build_translation_memory(prev_ids: List[str], workshop_path: Path) -> Dict[s
 
 
 def get_setup_prompt() -> str:
-    """构建用于初始化对话历史的系统指令和术语表。"""
+    """构建用于初始化对话历史的系统指令，增加对上下文的说明。"""
     base_system_prompt = """你是一个为游戏《边缘世界》(RimWorld) 设计的专业级翻译引擎。你的任务是将用户提供的JSON对象中的 `source_text` 字段翻译成简体中文，并填入 `translated_text` 字段。
 请严格遵守以下规则：
-1.  **保持键值不变**: 绝对不要修改 `key` 字段和 `source_text` 字段。
+1.  **保持键值不变**: 绝对不要修改 `key`、`source_text` 或 `context_info` 字段。
 2.  **精准翻译**: 确保翻译内容符合《边缘世界》的语境。
-3.  **返回完整JSON**: 你的输出必须是完整的、包含所有原始条目的JSON数组。
-4.  **处理换行符标记**: 文本中的 `[BR]` 标记是一个特殊的换行符占位符。在翻译时，必须在对应的位置原封不动地保留 `[BR]` 标记。绝对不能翻译、删除或将其转换成其他形式。"""
-
-    glossary_prompt_part = "5. **术语统一**: 这是最重要的规则。请严格参考以下术语表进行翻译，确保关键词的统一性：\n"
+3.  **利用上下文**: 如果提供了 `context_info` 字段，你必须参考它来生成更地道的翻译。例如，如果 `source_text` 是 "plinth"，而 `context_info` 包含 "Woody"，你应该倾向于翻译成“木制基座”或“木质底座”，而不是简单的“基座”。
+4.  **返回完整JSON**: 你的输出必须是完整的、包含所有原始条目的JSON数组。
+5.  **处理换行符标记**: 文本中的 `[BR]` 标记是换行符占位符，必须在译文中原样保留。"""
+    glossary_prompt_part = "6. **术语统一**: 这是最重要的规则。请严格参考以下术语表进行翻译...\n"
     glossary_items = [f"- '{en.lower()}': '{cn}'" for en, cn in RIMWORLD_GLOSSARY.items()]
     glossary_prompt_part += "\n".join(glossary_items)
-
     return f"{base_system_prompt}\n\n{glossary_prompt_part}\n\n我明白了这些规则，请开始提供需要翻译的JSON内容。"
 
 
-def convert_dict_to_json_items(data: Dict[str, str]) -> List[Dict[str, str]]:
-    """将Python字典转换为用于JSON输入的列表，并将\n替换为[BR]标记。"""
-    return [{"key": k, "source_text": v.replace('\n', '[BR]'), "translated_text": ""} for k, v in data.items()]
-
+def convert_dict_to_json_items(data: Dict[str, dict]) -> List[Dict[str, str]]:
+    """将Python字典转换为用于JSON输入的列表，并包含上下文。"""
+    items = []
+    for k, v_dict in data.items():
+        items.append({
+            "key": k,
+            "source_text": v_dict['text'].replace('\\n', '[BR]').replace('\n', '[BR]'),
+            "translated_text": "",
+            "context_info": v_dict.get('context')
+        })
+    return items
 
 def convert_parsed_json_to_dict(parsed_items: List[TranslationItem]) -> Dict[str, str]:
     """将API返回的Pydantic对象列表转换为Python字典，并将所有换行表示统一为字符串'\\n'。"""
@@ -680,47 +689,41 @@ def translate_with_json_mode(client: genai.Client, history: List[types.Content],
     return None  # 所有重试失败后返回
 
 
-def translate_and_save(client: genai.Client, history: List[types.Content], targets: Dict[str, str],
+def translate_and_save(client: genai.Client, history: List[types.Content], targets: Dict[str, dict],
                        memory: Dict[str, dict], output_file_path: Path) -> Dict[str, dict]:
-    """
-    通用翻译和保存逻辑。
-    使用三方校对记忆库，并返回为新缓存准备的数据。
-    """
-    # 定义错误/占位符前缀
+    """通用翻译和保存逻辑，实现四向校对并返回新缓存。"""
     ERROR_PREFIX = "【API错误】"
     ORIGINAL_PREFIX = "【原文】"
+    to_translate_dict, final_translation_dict, new_cache_data = {}, {}, {}
 
-    to_translate_dict = {}
-    final_translation_dict = {}
-    new_cache_data = {}
+    for key, new_data in targets.items():
+        new_en_text = new_data['text']
+        new_context = new_data.get('context')
 
-    for key, new_en_text in targets.items():
         if key in memory:
-            old_en_text = memory[key].get('en', '')
-            old_cn_text = memory[key].get('cn', '')
+            old_data = memory[key]
+            old_en_text = old_data.get('en', '')
+            old_cn_text = old_data.get('cn', '')
+            old_context = old_data.get('context')
 
             is_en_text_same = (new_en_text == old_en_text)
+            is_context_same = (new_context == old_context)
             is_cn_text_valid = not (isinstance(old_cn_text, str) and (
-                    old_cn_text.startswith(ERROR_PREFIX) or old_cn_text.startswith(ORIGINAL_PREFIX)))
+                        old_cn_text.startswith(ERROR_PREFIX) or old_cn_text.startswith(ORIGINAL_PREFIX)))
 
-            if is_en_text_same and is_cn_text_valid:
-                # 完美匹配：直接使用旧翻译
+            if is_en_text_same and is_context_same and is_cn_text_valid:
                 final_translation_dict[key] = old_cn_text
-                new_cache_data[key] = {'en': new_en_text, 'cn': old_cn_text}
+                new_cache_data[key] = {'en': new_en_text, 'cn': old_cn_text, 'context': new_context}
             else:
-                # 需要重翻：原文已更新 或 上次翻译失败
-                to_translate_dict[key] = new_en_text
+                to_translate_dict[key] = new_data
         else:
-            # 全新条目：直接加入待翻译列表
-            to_translate_dict[key] = new_en_text
+            to_translate_dict[key] = new_data
 
     if to_translate_dict:
         json_items_to_translate = convert_dict_to_json_items(to_translate_dict)
-        if CONFIG['system'].get('slow_mode', False):
-            time.sleep(CONFIG['system'].get('slow_mode_delay', 2))
+        if CONFIG['system'].get('slow_mode', False): time.sleep(CONFIG['system'].get('slow_mode_delay', 2))
 
         parsed_result = translate_with_json_mode(client, history, json_items_to_translate)
-
         if parsed_result:
             translated_dict = convert_parsed_json_to_dict(parsed_result)
             response_for_history = TranslationResponse(translations=parsed_result)
@@ -729,30 +732,33 @@ def translate_and_save(client: genai.Client, history: List[types.Content], targe
             history.append(
                 types.Content(role="model", parts=[types.Part.from_text(text=response_for_history.model_dump_json())]))
 
-            for key, original_text in to_translate_dict.items():
+            for key, original_data in to_translate_dict.items():
+                original_text = original_data['text']
+                context = original_data.get('context')
                 translated_text = translated_dict.get(key)
                 if translated_text:
                     final_translation_dict[key] = translated_text
-                    new_cache_data[key] = {'en': original_text, 'cn': translated_text}
+                    new_cache_data[key] = {'en': original_text, 'cn': translated_text, 'context': context}
                 else:
-                    final_translation_dict[key] = f"【原文】{original_text}"
-                    new_cache_data[key] = {'en': original_text, 'cn': f"【原文】{original_text}"}
+                    final_translation_dict[key] = f"{ORIGINAL_PREFIX}{original_text}"
+                    new_cache_data[key] = {'en': original_text, 'cn': f"{ORIGINAL_PREFIX}{original_text}",
+                                           'context': context}
         else:
-            for key, original_text in to_translate_dict.items():
-                final_translation_dict[key] = f"【API错误】{original_text}"
-                new_cache_data[key] = {'en': original_text, 'cn': f"【API错误】{original_text}"}
+            for key, original_data in to_translate_dict.items():
+                original_text = original_data['text']
+                context = original_data.get('context')
+                final_translation_dict[key] = f"{ERROR_PREFIX}{original_text}"
+                new_cache_data[key] = {'en': original_text, 'cn': f"{ERROR_PREFIX}{original_text}", 'context': context}
 
     if not final_translation_dict: return {}
 
     output_file_path.parent.mkdir(parents=True, exist_ok=True)
     root = etree.Element("LanguageData")
-    for key in targets:
-        if key in final_translation_dict:
-            node = etree.SubElement(root, key)
-            node.text = final_translation_dict[key]
+    for key, value in sorted(final_translation_dict.items()):
+        node = etree.SubElement(root, key)
+        node.text = value
     tree = etree.ElementTree(root)
     tree.write(str(output_file_path), encoding='utf-8', xml_declaration=True, pretty_print=True)
-
     return new_cache_data
 
 
@@ -798,24 +804,21 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
 
     abstract_defs = {}
     def_inheritance_map = {}
-    concrete_def_elements = []  # 存储具体的def节点及其来源文件
+    concrete_def_elements = []
     parser = etree.XMLParser(remove_blank_text=True, recover=True)
 
-    # --- 阶段一: 扫描所有文件, 建立抽象模板库和继承关系图 ---
+    # --- 第一阶段: 学习抽象模板和继承关系 ---
     print("    -> 阶段1: 正在学习Mod定义和继承关系...")
     for file_path in files_to_scan:
         try:
             tree = etree.parse(str(file_path), parser)
-            # 处理文件中的所有节点（包括根节点下的和<value>节点下的）
             for element in tree.xpath('//*[self::Defs or self::Patch]/*|//value/*'):
                 if not isinstance(element.tag, str): continue
-
                 current_name = element.get("Name") or (
                     element.find("defName").text if element.find("defName") is not None else None)
                 parent_name = element.get("ParentName")
                 if current_name and parent_name:
                     def_inheritance_map[current_name.strip()] = parent_name.strip()
-
                 if element.get("Abstract", "False").lower() == 'true' and element.get("Name"):
                     template_name = element.get("Name")
                     if template_name not in abstract_defs: abstract_defs[template_name] = {}
@@ -824,8 +827,7 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
                             'translatable_def_tags'] and sub.text:
                             abstract_defs[template_name][sub.tag] = sub.text.strip()
                 elif element.find("defName") is not None:
-                    concrete_def_elements.append((element, file_path))
-
+                    concrete_def_elements.append(element)
         except etree.XMLSyntaxError:
             continue
 
@@ -833,38 +835,45 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
 
     # --- 阶段二: 遍历具体定义，递归继承并分组 ---
     all_targets_grouped = {}
-    print("    -> 阶段2: 正在解析具体定义并处理继承...")
-    for element, file_path in concrete_def_elements:
+    print("    -> 阶段2: 正在解析具体定义并处理继承与材质上下文...")
+    for element in concrete_def_elements:
+        if element.get("Abstract", "False").lower() == 'true': continue
         def_name_node = element.find("defName")
         if def_name_node is None or not def_name_node.text: continue
         def_name = def_name_node.text.strip()
+        if any(char in def_name for char in ['{', '}', '(', ')', '/']): continue
 
+        # 1. 收集字段 (包括继承)
         fields_to_translate = {}
-
-        # 递归向上查找所有父类的翻译字段
         current_parent_name = element.get("ParentName")
         visited_parents = set()
         while current_parent_name and current_parent_name not in visited_parents:
             visited_parents.add(current_parent_name)
             if current_parent_name in abstract_defs:
                 for tag, text in abstract_defs[current_parent_name].items():
-                    if tag not in fields_to_translate:  # 子类优先，不覆盖
-                        fields_to_translate[tag] = text
+                    if tag not in fields_to_translate: fields_to_translate[tag] = text
             current_parent_name = def_inheritance_map.get(current_parent_name)
-
-        # 最后采集自己的字段，这会覆盖所有父类的同名字段
         for sub in element:
             if isinstance(sub.tag, str) and sub.tag in CONFIG['rules']['translatable_def_tags'] and sub.text:
                 fields_to_translate[sub.tag] = sub.text.strip()
 
+        # 2. 收集材质上下文
+        context_str = None
+        stuff_categories_nodes = element.xpath("stuffCategories/li/text()")
+        if stuff_categories_nodes:
+            context_str = f"This item is stuffable with materials from categories: {', '.join(stuff_categories_nodes)}"
+
+        # 3. 组合最终待翻译目标
         if fields_to_translate:
             def_type = element.tag
             if def_type not in all_targets_grouped: all_targets_grouped[def_type] = {}
-            filename = file_path.name
-            if filename not in all_targets_grouped[def_type]: all_targets_grouped[def_type][filename] = {}
+            # 使用defName作为文件名的一部分，避免同名文件冲突
+            group_key = f"{def_name}_{def_type}"
+            if group_key not in all_targets_grouped[def_type]: all_targets_grouped[def_type][group_key] = {}
 
             for tag, text in fields_to_translate.items():
-                all_targets_grouped[def_type][filename][f"{def_name}.{tag}"] = text
+                injection_key = f"{def_name}.{tag}"
+                all_targets_grouped[def_type][group_key][injection_key] = {"text": text, "context": context_str}
 
     if not all_targets_grouped:
         print("  -> 未在Defs/Patches中找到可翻译内容。")
@@ -872,15 +881,15 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
 
     # 3. 翻译并保存
     safe_mod_name = "".join(c for c in mod_info['name'] if c.isalnum() or c in " .-_").strip()
-    for def_type, files in all_targets_grouped.items():
+    for def_type, groups in all_targets_grouped.items():
         print(f"    -> 发现Def类型: {def_type}")
-        for filename, targets in files.items():
-            print(f"      -> 正在处理来自 {filename} 的 {len(targets)} 个条目")
+        for group_key, targets in groups.items():
+            output_filename = f"{group_key}.xml"
+            print(f"      -> 正在处理来自 {group_key} 的 {len(targets)} 个条目")
             output_dir = output_path / "Cont" / safe_mod_name / "Languages" / "ChineseSimplified" / "DefInjected" / def_type
-            output_file_path = output_dir / filename
+            output_file_path = output_dir / output_filename
             new_cache_entries = translate_and_save(client, history, targets, memory, output_file_path)
             mod_cache.update(new_cache_entries)
-
     return mod_cache
 
 
