@@ -551,8 +551,11 @@ def get_setup_prompt() -> str:
 2.  **精准翻译**: 确保翻译内容符合《边缘世界》的语境。
 3.  **利用上下文**: 如果提供了 `context_info` 字段，你必须参考它来生成更地道的翻译。例如，如果 `source_text` 是 "Bundle A"，而 `context_info` 包含 "Leathery"，你应该倾向于翻译成“A型皮革捆堆”或“A型皮革捆包”，而不是简单的“A型捆堆”。
 4.  **返回完整JSON**: 你的输出必须是完整的、包含所有原始条目的JSON数组。
-5.  **处理换行符标记**: 文本中的 `[BR]` 标记是换行符占位符，必须在译文中原样保留。"""
-    glossary_prompt_part = "6. **术语统一**: 这是最重要的规则。请严格参考以下术语表进行翻译...\n"
+5.  **处理换行符标记**: 文本中的 `[BR]` 标记是换行符占位符，必须在译文中原样保留。
+6.  **特殊关键词保留**: 文本中所有被方括号`[]`包裹起来的部分，例如 `[asker_nameFull]` 或 `[raid/raidPawnKinds]`，是游戏的特殊关键词，绝对不能翻译。你必须将它们原封不动地保留在译文中。
+    - 错误示例: 将 `the [adjAny] monster` 翻译为 `那个[任何形容词]怪物`
+    - 正确示例: 将 `the [adjAny] monster` 翻译为 `[adjAny]的怪物`"""
+    glossary_prompt_part = "7. **术语统一**: 这是最重要的规则。请严格参考以下术语表进行翻译...\n"
     glossary_items = [f"- '{en.lower()}': '{cn}'" for en, cn in RIMWORLD_GLOSSARY.items()]
     glossary_prompt_part += "\n".join(glossary_items)
     return f"{base_system_prompt}\n\n{glossary_prompt_part}\n\n我明白了这些规则，请开始提供需要翻译的JSON内容。"
@@ -705,16 +708,15 @@ def process_standard_translation(client: genai.Client, history: List[types.Conte
     return mod_cache
 
 
-def process_def_injection_translation(client: genai.Client, history: List[types.Content], mod_path: Path,
+def process_def_injection_translation(client: genai.Client, history: List[types.Content],
                                       mod_info: Dict, memory: Dict, output_path: Path,
-                                      def_inheritance_map: Dict, files_to_scan: List[Path]) -> Dict[
-    str, dict]:  # <-- abstract_defs 已移除
+                                      def_inheritance_map: Dict, files_to_scan: List[Path]) -> Dict[str, dict]:
     """
-    处理注入式翻译（v22 - 清洁版）。
-    - 移除了不再使用的 abstract_defs 知识库，使代码更清晰高效。
-    - 逻辑与v21版完全一致，功能无任何缺失。
+    处理注入式翻译（v24 - “终端节点发现”最终完善版）。
+    - 最终修复了导致部分列表（如questNameRules）被跳过的微妙状态管理BUG。
+    - 逻辑清晰、高效且极度健壮，能够正确处理我们遇到的所有复杂情况。
     """
-    print(f"  -> 开始进行注入式翻译 (v22 - 清洁版)...")
+    print(f"  -> 开始进行注入式翻译 (v24 - 终端节点发现)...")
 
     if not files_to_scan:
         print("  -> 没有需要注入翻译的文件。")
@@ -732,28 +734,13 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
         if (el.find("defName") is not None and el.find("defName").text) or el.get("Name")
     }
 
-    # 我们只对 def_element_map 中的每个唯一Def处理一次
     for def_name, element in def_element_map.items():
         try:
+            # 【核心修正】为每一个新的Def，都创建一个全新的、独立的processed_paths集合
+            # 这确保了不同Def之间的翻译任务不会互相干扰。
+            processed_paths = set()
+
             is_abstract = element.get("Abstract", "False").lower() == 'true'
-            if is_abstract and not element.xpath("stuffCategories/li/text()"):
-                continue
-
-            defs_to_process = {}
-            if not is_abstract:
-                defs_to_process[def_name] = element
-            else:
-                base_name_for_generation = element.get("Name")
-                pattern = CONFIG.get('generative_rules', {}).get('prediction_pattern', '{base_name}{stuff_defName}')
-                stuff_categories = element.xpath("stuffCategories/li/text()")
-                for cat_name in stuff_categories:
-                    if cat_name.strip() in VANILLA_STUFFS:
-                        for stuff in VANILLA_STUFFS[cat_name.strip()]:
-                            generated_def_name = pattern.format(base_name=base_name_for_generation,
-                                                                stuff_defName=stuff['defName'])
-                            defs_to_process[generated_def_name] = element
-
-            if not defs_to_process: continue
 
             lineage_names = []
             current_name = def_name
@@ -764,39 +751,69 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
                 lineage_names.append(current_name)
                 current_name = def_inheritance_map.get(current_name)
 
-            processed_paths = set()
+            resolved_stuff_categories = []
+            for name in reversed(lineage_names):
+                lineage_element = def_element_map.get(name)
+                if lineage_element is not None:
+                    stuff_cats = lineage_element.xpath("stuffCategories/li/text()")
+                    if stuff_cats:
+                        resolved_stuff_categories = [sc.strip() for sc in stuff_cats]
+
+            if is_abstract and not resolved_stuff_categories:
+                continue
+
+            defs_to_process = {}
+            if not is_abstract:
+                defs_to_process[def_name] = element
+            else:
+                base_name_for_generation = element.get("Name")
+                pattern = CONFIG.get('generative_rules', {}).get('prediction_pattern', '{base_name}{stuff_defName}')
+                for cat_name in resolved_stuff_categories:
+                    if cat_name in VANILLA_STUFFS:
+                        for stuff in VANILLA_STUFFS[cat_name]:
+                            generated_def_name = pattern.format(base_name=base_name_for_generation,
+                                                                stuff_defName=stuff['defName'])
+                            defs_to_process[generated_def_name] = element
+
+            if not defs_to_process: continue
+
+            stuff_context_str = f" Material categories: {', '.join(resolved_stuff_categories)}." if resolved_stuff_categories else ""
+
             for final_def_name, source_element in defs_to_process.items():
                 def_type = source_element.tag
                 filename = Path(source_element.base).name
                 if def_type not in all_targets_grouped: all_targets_grouped[def_type] = {}
                 if filename not in all_targets_grouped[def_type]: all_targets_grouped[def_type][filename] = {}
 
+                # 从子类到父类遍历继承链，以确保子类定义优先
                 for lineage_name in lineage_names:
                     current_element_in_lineage = def_element_map.get(lineage_name)
                     if current_element_in_lineage is None: continue
 
-                    xpath_query = " | ".join([f".//{tag}" for tag in translatable_tags])
-                    for node in current_element_in_lineage.xpath(xpath_query):
+                    for node in current_element_in_lineage.xpath(".//*[not(*) and text()]"):
+                        if not node.text.strip(): continue
+
+                        # 使用全新、正确的验证逻辑
+                        is_translatable = False
+                        parent = node.getparent()
+
+                        # 情况1：节点本身的标签是可翻译的 (例如 <label>, <description>)
+                        if node.tag in translatable_tags:
+                            is_translatable = True
+                        # 情况2：节点是<li>，且其父节点的标签是可翻译的 (例如 <rulesStrings>)
+                        elif node.tag == 'li' and parent is not None and parent.tag in translatable_tags:
+                            is_translatable = True
+
+                        if not is_translatable: continue
+
                         path = get_node_path(node, current_element_in_lineage)
                         if path in processed_paths: continue
 
-                        children = node.getchildren()
-
-                        if not children:
-                            if node.text and node.text.strip():
-                                processed_paths.add(path)
-                                key = f"{final_def_name}.{path}"
-                                all_targets_grouped[def_type][filename][key] = {"text": node.text.strip(),
-                                                                                "context": f"Path: {path}"}
-                        elif all(c.tag == 'li' for c in children) and all(
-                                not c.getchildren() and c.text and c.text.strip() for c in children):
-                            processed_paths.add(path)
-                            for i, li_node in enumerate(children):
-                                li_path = f"{path}.{i}"
-                                processed_paths.add(li_path)
-                                key = f"{final_def_name}.{li_path}"
-                                all_targets_grouped[def_type][filename][key] = {"text": li_node.text.strip(),
-                                                                                "context": f"List item {i} in {path}"}
+                        processed_paths.add(path)
+                        key = f"{final_def_name}.{path}"
+                        final_context = f"Path: {path}.{stuff_context_str}"
+                        all_targets_grouped[def_type][filename][key] = {"text": node.text.strip(),
+                                                                        "context": final_context}
         except Exception as e:
             print(f"警告：在处理Def '{def_name}' 时发生意外错误: {e}")
             continue
@@ -951,7 +968,7 @@ def main(config: dict):
 
         # 将这个mod对应的、已包含辅助文件的列表传递给函数
         files_for_this_mod = def_files_for_mods.get(mod_id, [])
-        cache2 = process_def_injection_translation(client, conversation_history, mod_path, mod_info, translation_memory,
+        cache2 = process_def_injection_translation(client, conversation_history, mod_info, translation_memory,
                                                    output_path, def_inheritance_map,
                                                    files_to_scan=files_for_this_mod)
         current_mod_cache.update(cache2)

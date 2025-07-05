@@ -36,9 +36,6 @@ translatable_def_tags = [
 # 在这里添加的术语，会覆盖脚本内置的默认术语表，或补充新术语
 # 这对于特定Mod的主题翻译或个人偏好非常有用
 [custom_glossary]
-"Plasteel" = "玻璃钢"  # 覆盖默认的“玻璃钢”
-"Archotech" = "超凡科技" # 新增术语
-"Mechanoid" = "机械集群" # 覆盖默认的“机械体”
 
 
 # [6] AI交互设置 (可选)
