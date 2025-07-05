@@ -11,4 +11,5 @@ wheels/
 .venv
 /steamcmd/
 /translation_output/
+/translation_output_old/
 /workshop_downloads/

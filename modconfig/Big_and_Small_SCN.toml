@@ -29,8 +29,7 @@ previous = "3515395200"
 [rules]
 # 可被注入翻译的XML标签
 translatable_def_tags = [
-    'label', 'description', 'jobString', 'reportString', 'verb', 'gerund',
-    'notification', 'letterLabel', 'letterText', 'statement', 'beginLetter', 'extraTooltip', 'deathMessage', 'labelPlural', 'pawnsPlural',
+    'label', 'description', 'jobString', 'reportString', 'verb', 'gerund', 'notification', 'letterLabel', 'letterText', 'statement', 'beginLetter', 'extraTooltip', 'deathMessage', 'useLabel', 'labelPlural', 'pawnsPlural', 'summary', 'name', 'fixedName', 'leaderTitle', 'text',
 ]
 
 # --- 新增配置区 ---
