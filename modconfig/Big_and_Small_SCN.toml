@@ -29,7 +29,7 @@ previous = "3515395200"
 [rules]
 # 可被注入翻译的XML标签
 translatable_def_tags = [
-    'label', 'description', 'jobString', 'reportString', 'verb', 'gerund', 'notification', 'letterLabel', 'letterText', 'statement', 'beginLetter', 'extraTooltip', 'deathMessage', 'useLabel', 'labelPlural', 'pawnsPlural', 'summary', 'name', 'fixedName', 'leaderTitle', 'text',
+    'label', 'description', 'jobString', 'reportString', 'verb', 'gerund', 'notification', 'letterLabel', 'letterText', 'statement', 'beginLetter', 'extraTooltip', 'deathMessage', 'useLabel', 'labelPlural', 'pawnsPlural', 'summary', 'name', 'fixedName', 'leaderTitle', 'text', 'rulesStrings',
 ]
 
 # --- 新增配置区 ---
@@ -83,7 +83,7 @@ subtitle_template = "简体中文汉化 by {author}"
 # [9] 系统级配置 (可选，如果不存在，脚本会使用默认值)
 [system]
 slow_mode = true
-gemini_model = "gemini-2.5-flash"
+gemini_model = "gemini-2.5-flash-lite-preview-06-17"
 
 # 手动创建的“生成结果”辅助文件所在的目录名
 helper_files_root = "project_helpers"

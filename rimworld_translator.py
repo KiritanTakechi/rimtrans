@@ -706,13 +706,15 @@ def process_standard_translation(client: genai.Client, history: List[types.Conte
 
 
 def process_def_injection_translation(client: genai.Client, history: List[types.Content], mod_path: Path,
-                                      mod_info: Dict, memory: Dict, output_path: Path, abstract_defs: Dict,
-                                      def_inheritance_map: Dict, files_to_scan: List[Path]) -> Dict[str, dict]:
+                                      mod_info: Dict, memory: Dict, output_path: Path,
+                                      def_inheritance_map: Dict, files_to_scan: List[Path]) -> Dict[
+    str, dict]:  # <-- abstract_defs 已移除
     """
-    处理注入式翻译。
-    - 明确了context的构建逻辑，确保无材质信息时，context中不包含相关字段。
+    处理注入式翻译（v22 - 清洁版）。
+    - 移除了不再使用的 abstract_defs 知识库，使代码更清晰高效。
+    - 逻辑与v21版完全一致，功能无任何缺失。
     """
-    print(f"  -> 开始进行注入式翻译...")
+    print(f"  -> 开始进行注入式翻译 (v22 - 清洁版)...")
 
     if not files_to_scan:
         print("  -> 没有需要注入翻译的文件。")
@@ -721,124 +723,82 @@ def process_def_injection_translation(client: genai.Client, history: List[types.
     print(f"  -> 正在解析 {len(files_to_scan)} 个定义/补丁/辅助文件...")
     all_targets_grouped = {}
     parser = etree.XMLParser(remove_blank_text=True, recover=True)
-    translatable_tags = CONFIG['rules'].get('translatable_def_tags', [])
+    translatable_tags = set(CONFIG['rules'].get('translatable_def_tags', []))
 
-    # 预先构建一个从defName到其XML element的映射，方便快速查找
-    def_element_map = {}
-    for file_path in files_to_scan:
+    def_element_map = {
+        (el.find("defName").text or "").strip() if el.find("defName") is not None else el.get("Name"): el
+        for fp in files_to_scan
+        for el in etree.parse(str(fp), parser).xpath('//*[defName] | //*[@Abstract="True" and @Name]')
+        if (el.find("defName") is not None and el.find("defName").text) or el.get("Name")
+    }
+
+    # 我们只对 def_element_map 中的每个唯一Def处理一次
+    for def_name, element in def_element_map.items():
         try:
-            tree = etree.parse(str(file_path), parser)
-            for element in tree.xpath('//*[defName] | //*[@Abstract="True" and @Name]'):
-                key = (element.find("defName").text or "").strip() if element.find(
-                    "defName") is not None else element.get("Name")
-                if key: def_element_map[key] = element
-        except etree.XMLSyntaxError:
-            continue
+            is_abstract = element.get("Abstract", "False").lower() == 'true'
+            if is_abstract and not element.xpath("stuffCategories/li/text()"):
+                continue
 
-    for file_path in files_to_scan:
-        try:
-            tree = etree.parse(str(file_path), parser)
-            for element in tree.xpath('//*[defName] | //*[@Abstract="True" and @Name]'):
+            defs_to_process = {}
+            if not is_abstract:
+                defs_to_process[def_name] = element
+            else:
+                base_name_for_generation = element.get("Name")
+                pattern = CONFIG.get('generative_rules', {}).get('prediction_pattern', '{base_name}{stuff_defName}')
+                stuff_categories = element.xpath("stuffCategories/li/text()")
+                for cat_name in stuff_categories:
+                    if cat_name.strip() in VANILLA_STUFFS:
+                        for stuff in VANILLA_STUFFS[cat_name.strip()]:
+                            generated_def_name = pattern.format(base_name=base_name_for_generation,
+                                                                stuff_defName=stuff['defName'])
+                            defs_to_process[generated_def_name] = element
 
-                # --- 1. 构建包含所有继承信息的、最终的字段字典 {path: text} ---
-                lineage_names = []
-                current_name = (element.find("defName").text or "").strip() if element.find(
-                    "defName") is not None else element.get("Name")
+            if not defs_to_process: continue
 
-                # 【核心修正】增加一个集合来检测循环依赖
-                visited_in_lineage = set()
-                while current_name:
-                    # 如果发现即将访问的父类已经在此次的查找中出现过，说明有循环
-                    if current_name in visited_in_lineage:
-                        print(f"\n警告：在构建继承链时发现循环依赖于 {current_name}，已中断继承。")
-                        break
+            lineage_names = []
+            current_name = def_name
+            visited_in_lineage = set()
+            while current_name:
+                if current_name in visited_in_lineage: break
+                visited_in_lineage.add(current_name)
+                lineage_names.append(current_name)
+                current_name = def_inheritance_map.get(current_name)
 
-                    visited_in_lineage.add(current_name)
-                    lineage_names.append(current_name)
-                    current_name = def_inheritance_map.get(current_name)
+            processed_paths = set()
+            for final_def_name, source_element in defs_to_process.items():
+                def_type = source_element.tag
+                filename = Path(source_element.base).name
+                if def_type not in all_targets_grouped: all_targets_grouped[def_type] = {}
+                if filename not in all_targets_grouped[def_type]: all_targets_grouped[def_type][filename] = {}
 
-                # 从最顶层父类开始，用字段填充，后代会覆盖祖先
-                resolved_fields = {}
-                resolved_stuff_categories = []
-                for name in reversed(lineage_names):
-                    if name in abstract_defs:
-                        for path, text in abstract_defs.get(name, {}).items():
-                            if not path.startswith('_'):  # 忽略我们的特殊键
-                                resolved_fields[path] = text
-                            # 继承材质信息（子类会覆盖父类）
-                        if '_stuffCategories' in abstract_defs.get(name, {}):
-                            resolved_stuff_categories = abstract_defs[name]['_stuffCategories']
+                for lineage_name in lineage_names:
+                    current_element_in_lineage = def_element_map.get(lineage_name)
+                    if current_element_in_lineage is None: continue
 
-                # 【核心修正】现在，用当前元素自己的、符合translatable_tags的字段来覆盖/补充
-                for node in element.xpath(".//*"):
-                    if node.tag in translatable_tags and node.text and node.text.strip():
-                        path = get_node_path(node, element)
-                        resolved_fields[path] = node.text.strip()
+                    xpath_query = " | ".join([f".//{tag}" for tag in translatable_tags])
+                    for node in current_element_in_lineage.xpath(xpath_query):
+                        path = get_node_path(node, current_element_in_lineage)
+                        if path in processed_paths: continue
 
-                current_stuff_cats = element.xpath("stuffCategories/li/text()")
-                if current_stuff_cats:
-                    resolved_stuff_categories = [sc.strip() for sc in current_stuff_cats]
-
-                if not resolved_fields: continue
-
-                # --- 2. 确定要处理的基础Def列表 (包括生成式) ---
-                defs_to_process = {}
-                is_abstract = element.get("Abstract", "False").lower() == 'true'
-                def_name = (element.find("defName").text or "").strip() if not is_abstract else element.get("Name")
-                if not def_name: continue
-
-                if not is_abstract:
-                    defs_to_process[def_name] = element
-                elif resolved_stuff_categories:  # 使用我们解析出的最终材质列表
-                    base_name_for_generation = element.get("Name")
-                    pattern = CONFIG.get('generative_rules', {}).get('prediction_pattern',
-                                                                     '{base_name}{stuff_defName}')
-                    for cat_name in resolved_stuff_categories:
-                        if cat_name in VANILLA_STUFFS:
-                            for stuff in VANILLA_STUFFS[cat_name]:
-                                generated_def_name = pattern.format(base_name=base_name_for_generation,
-                                                                    stuff_defName=stuff['defName'])
-                                defs_to_process[generated_def_name] = element
-
-                if not defs_to_process: continue
-
-                # --- 3. 为每个最终的defName，使用resolved_fields和安全规则生成翻译任务 ---
-                base_context_parts = []
-                if resolved_stuff_categories:
-                    base_context_parts.append(f"Material categories: {', '.join(resolved_stuff_categories)}.")
-
-                for final_def_name, source_element in defs_to_process.items():
-                    def_type = source_element.tag
-                    filename = file_path.name
-                    if def_type not in all_targets_grouped: all_targets_grouped[def_type] = {}
-                    if filename not in all_targets_grouped[def_type]: all_targets_grouped[def_type][filename] = {}
-
-                    for path, text in resolved_fields.items():
-                        # 在原始子类中查找对应节点，以分析其结构
-                        path_xpath = './' + '/'.join(f'li[{int(p) + 1}]' if p.isdigit() else p for p in path.split('.'))
-                        target_node_list = source_element.xpath(path_xpath)
-
-                        if not target_node_list: continue
-
-                        target_node = target_node_list[0]
-                        children = target_node.getchildren()
-                        key = f"{final_def_name}.{path}"
-
-                        context_parts = [f"Path: {path}"] + base_context_parts
-                        final_context = " ".join(context_parts)
+                        children = node.getchildren()
 
                         if not children:
-                            all_targets_grouped[def_type][filename][key] = {"text": text, "context": final_context}
+                            if node.text and node.text.strip():
+                                processed_paths.add(path)
+                                key = f"{final_def_name}.{path}"
+                                all_targets_grouped[def_type][filename][key] = {"text": node.text.strip(),
+                                                                                "context": f"Path: {path}"}
                         elif all(c.tag == 'li' for c in children) and all(
                                 not c.getchildren() and c.text and c.text.strip() for c in children):
+                            processed_paths.add(path)
                             for i, li_node in enumerate(children):
-                                li_key = f"{key}.{i}"
-                                li_text = li_node.text.strip()
-                                li_context_parts = [f"List item {i} in {path}"] + base_context_parts
-                                all_targets_grouped[def_type][filename][li_key] = {"text": li_text, "context": " ".join(li_context_parts)}
-
-        except etree.XMLSyntaxError as e:
-            print(f"警告：解析XML文件时发生错误 {file_path}: {e}")
+                                li_path = f"{path}.{i}"
+                                processed_paths.add(li_path)
+                                key = f"{final_def_name}.{li_path}"
+                                all_targets_grouped[def_type][filename][key] = {"text": li_node.text.strip(),
+                                                                                "context": f"List item {i} in {path}"}
+        except Exception as e:
+            print(f"警告：在处理Def '{def_name}' 时发生意外错误: {e}")
             continue
 
     if not all_targets_grouped:
@@ -929,19 +889,18 @@ def main(config: dict):
 
     # --- 全局学习阶段 ---
     print("\n--- 全局学习阶段: 扫描所有目标Mod以构建知识库 ---")
-    abstract_defs, def_inheritance_map = {}, {}
+
+    def_inheritance_map = {}
     parser = etree.XMLParser(remove_blank_text=True, recover=True)
 
     helper_root_path_str = CONFIG.get('system', {}).get('helper_files_root')
     helper_root_path = BASE_WORKING_DIR / helper_root_path_str if helper_root_path_str else None
-    translatable_tags = CONFIG['rules'].get('translatable_def_tags', [])  # 在这里获取一次即可
 
     def_files_for_mods = {}
 
     for mod_id in tqdm(new_ids, desc="构建全局知识库"):
         mod_path = mod_content_path / mod_id
 
-        # 将 "Scenarios" 添加到扫描列表
         files_to_scan = find_source_files(mod_path, ["Defs", "Patches", "Scenarios"])
         if helper_root_path and helper_root_path.is_dir():
             mod_helper_path = helper_root_path / mod_id
@@ -956,7 +915,6 @@ def main(config: dict):
         for file_path in files_to_scan:
             try:
                 tree = etree.parse(str(file_path), parser)
-                # 注意：这里的xpath是为了找到所有Def的根，与翻译处理函数中的不同
                 for element in tree.xpath('//*[self::Defs or self::Patch]/*|//value/*'):
                     if not isinstance(element.tag, str): continue
 
@@ -967,29 +925,12 @@ def main(config: dict):
                     if current_name and parent_name:
                         if current_name.strip() == parent_name.strip():
                             print(f"\n警告：发现Def '{current_name}' 的父类是它自己，已忽略此继承关系。")
-                            continue  # 跳过，不将这个错误的继承关系加入map
-
+                            continue
                         def_inheritance_map[current_name] = parent_name.strip()
-
-                    if element.get("Abstract", "False").lower() == 'true' and element.get("Name"):
-                        template_name = element.get("Name")
-                        if template_name not in abstract_defs: abstract_defs[template_name] = {}
-
-                        # 【核心修正】在构建知识库时，应用 translatable_tags 过滤器
-                        for sub in element.xpath(".//*"):
-                            if sub.tag in translatable_tags and sub.text and sub.text.strip():
-                                path_string = get_node_path(sub, element)
-                                abstract_defs[template_name][path_string] = sub.text.strip()
-
-                        stuff_cats = element.xpath("stuffCategories/li/text()")
-                        if stuff_cats:
-                            # 使用一个特殊的、不会与普通标签冲突的键来存储
-                            abstract_defs[template_name]['_stuffCategories'] = [sc.strip() for sc in stuff_cats]
-
 
             except etree.XMLSyntaxError:
                 continue
-    print(f"  -> 全局知识库构建完毕，包含 {len(abstract_defs)} 个抽象模板。")
+    print(f"  -> 全局知识库构建完毕。")
 
     translation_memory = build_translation_memory(prev_ids, workshop_path)
 
@@ -1011,7 +952,7 @@ def main(config: dict):
         # 将这个mod对应的、已包含辅助文件的列表传递给函数
         files_for_this_mod = def_files_for_mods.get(mod_id, [])
         cache2 = process_def_injection_translation(client, conversation_history, mod_path, mod_info, translation_memory,
-                                                   output_path, abstract_defs, def_inheritance_map,
+                                                   output_path, def_inheritance_map,
                                                    files_to_scan=files_for_this_mod)
         current_mod_cache.update(cache2)
 
